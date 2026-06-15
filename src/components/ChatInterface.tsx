@@ -6,6 +6,7 @@ import { Send, Loader2, Eraser, Check, CheckCheck } from "lucide-react";
 import AudioPlayer from "./AudioPlayer";
 import MessageOptions from "./MessageOptions";
 import ReactionPicker from "./ReactionPicker";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface Message {
   id: string;
