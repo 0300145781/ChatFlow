@@ -67,6 +67,9 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
         .on("broadcast", { event: "message_updated" }, (p) => {
           listeners.forEach((l) => l("message_updated", p.payload));
         })
+        .on("broadcast", { event: "messages_read" }, (p) => {
+          listeners.forEach((l) => l("messages_read", p.payload));
+        })
         .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (p) => {
           listeners.forEach((l) => l("pg_insert", p.new));
         })
@@ -110,6 +113,13 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
       if (event === "message_updated" || event === "pg_update") {
         const msg = payload as Message;
         setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
+      }
+
+      if (event === "messages_read") {
+        const { messageIds, read_at } = payload;
+        setMessages((prev) => 
+          prev.map((m) => messageIds.includes(m.id) ? { ...m, read_at } : m)
+        );
       }
 
       if (event === "presence_sync") {
@@ -159,12 +169,11 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
         );
 
         if (channelRef.current) {
-          unreadMessages.forEach(msg => {
-            channelRef.current.send({
-              type: "broadcast",
-              event: "message_updated",
-              payload: { ...msg, read_at: now },
-            });
+          // Send ONE bulk broadcast to avoid hitting the 10 msg/sec rate limit
+          channelRef.current.send({
+            type: "broadcast",
+            event: "messages_read",
+            payload: { messageIds, read_at: now },
           });
         }
 
