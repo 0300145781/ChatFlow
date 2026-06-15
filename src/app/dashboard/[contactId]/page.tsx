@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useState, use } from "react";
+import { useEffect, useState, use, useRef } from "react";
 import { supabase } from "../../../../lib/supabase";
 import { useRouter } from "next/navigation";
 import ChatInterface from "../../../components/ChatInterface";
-import { User, ChevronLeft } from "lucide-react";
+import CallManager, { CallManagerRef } from "../../../components/CallManager";
+import { User, ChevronLeft, Phone, Video } from "lucide-react";
 import Link from "next/link";
 
 export default function ChatPage({ params }: { params: Promise<{ contactId: string }> }) {
   const resolvedParams = use(params);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [contactInfo, setContactInfo] = useState<{ name: string | null; friend_code: string; avatar_url: string | null } | null>(null);
+  const callManagerRef = useRef<CallManagerRef>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -72,9 +74,37 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
             </p>
           </div>
         </div>
+        
+        {/* Right side actions */}
+        <div className="ml-auto flex items-center gap-2">
+          <button 
+            onClick={() => callManagerRef.current?.startCall("audio")}
+            className="w-10 h-10 rounded-full flex items-center justify-center text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
+            title="Start Audio Call"
+          >
+            <Phone className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={() => callManagerRef.current?.startCall("video")}
+            className="w-10 h-10 rounded-full flex items-center justify-center text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
+            title="Start Video Call"
+          >
+            <Video className="w-5 h-5" />
+          </button>
+        </div>
       </header>
       
-      <ChatInterface currentUserId={currentUser.id} contactId={resolvedParams.contactId} />
+      <div className="flex-1 min-h-0">
+        <ChatInterface currentUserId={currentUser.id} contactId={resolvedParams.contactId} />
+      </div>
+      
+      <CallManager 
+        ref={callManagerRef}
+        currentUserId={currentUser.id} 
+        contactId={resolvedParams.contactId}
+        contactName={contactInfo.name || `User ${contactInfo.friend_code}`}
+        contactAvatar={contactInfo.avatar_url}
+      />
     </div>
   );
 }

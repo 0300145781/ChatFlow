@@ -123,3 +123,21 @@ add column read_at timestamp with time zone;
 -- Replies
 alter table messages
 add column reply_to_id uuid references messages(id) on delete set null;
+
+-- Calls
+create table calls (
+  id uuid default gen_random_uuid() primary key,
+  caller_id uuid references auth.users not null,
+  receiver_id uuid references auth.users not null,
+  status text not null check (status in ('completed', 'missed', 'rejected')),
+  duration_seconds integer default 0 not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+alter table calls enable row level security;
+
+create policy "Users can read their own calls." on calls
+  for select using (auth.uid() = caller_id or auth.uid() = receiver_id);
+
+create policy "Users can insert their own calls." on calls
+  for insert with check (auth.uid() = caller_id);
