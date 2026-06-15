@@ -48,6 +48,8 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const audioOnlyRef = useRef<HTMLAudioElement | null>(null);
+  
+  const pendingCandidatesRef = useRef<any[]>([]);
 
   useImperativeHandle(ref, () => ({
     startCall: (type) => initiateCall(type)
@@ -154,6 +156,7 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
     setRemoteIsMuted(false);
     setRemoteIsVideoOff(false);
     setCallDurationStr("00:00");
+    pendingCandidatesRef.current = [];
   };
 
   const recordCall = (status: "completed" | "missed" | "rejected") => {
@@ -217,11 +220,16 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
         }
       })
       .on("broadcast", { event: "ice_candidate" }, async ({ payload }) => {
-        if (payload.to === currentUserId && peerConnectionRef.current) {
-          try {
-            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate));
-          } catch (e) {
-            console.error("Error adding ice candidate", e);
+        if (payload.to === currentUserId) {
+          if (peerConnectionRef.current && peerConnectionRef.current.remoteDescription) {
+            try {
+              await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate));
+            } catch (e) {
+              console.error("Error adding ice candidate", e);
+            }
+          } else {
+            // Queue candidates received before remote description is set
+            pendingCandidatesRef.current.push(payload.candidate);
           }
         }
       })
@@ -320,6 +328,16 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
     const pendingOffer = (window as any)._pendingOffer;
     if (pendingOffer) {
       await pc.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+      
+      // Add any ICE candidates that were queued while waiting for user to accept
+      for (const candidate of pendingCandidatesRef.current) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error("Error adding queued ice candidate", e);
+        }
+      }
+      pendingCandidatesRef.current = [];
     }
     
     stream.getTracks().forEach(t => pc.addTrack(t, stream));
