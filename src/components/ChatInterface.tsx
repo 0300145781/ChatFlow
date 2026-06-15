@@ -31,6 +31,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>("CONNECTING");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const channelRef = useRef<any>(null);
@@ -140,6 +141,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
         );
 
       channel.subscribe(async (status: string) => {
+        setConnectionStatus(status);
         if (status === "SUBSCRIBED" && channel) {
           await channel.track({ isTyping: false, updatedAt: Date.now() });
         }
@@ -346,7 +348,14 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#fcfcfc] dark:bg-[#111111]">
+    <div className="flex flex-col h-full bg-[#fcfcfc] dark:bg-[#111111] relative">
+      {/* WebSocket Debug Indicator (Temporary) */}
+      {connectionStatus !== "SUBSCRIBED" && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full shadow-lg font-bold">
+          SOCKET: {connectionStatus}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
