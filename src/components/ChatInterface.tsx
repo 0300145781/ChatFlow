@@ -63,6 +63,19 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
           presence: { key: currentUserId },
         },
       })
+      .on("broadcast", { event: "new_message" }, (payload) => {
+        const msg = payload.payload as Message;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      })
+      .on("broadcast", { event: "message_updated" }, (payload) => {
+        const updatedMsg = payload.payload as Message;
+        setMessages((prev) => 
+          prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
+        );
+      })
       .on(
         "postgres_changes",
         {
@@ -76,7 +89,10 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
             (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
             (msg.sender_id === contactId && msg.receiver_id === currentUserId)
           ) {
-            setMessages((prev) => [...prev, msg]);
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === msg.id)) return prev;
+              return [...prev, msg];
+            });
           }
         }
       )
@@ -142,6 +158,16 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
           )
         );
 
+        if (channelRef.current) {
+          unreadMessages.forEach(msg => {
+            channelRef.current.send({
+              type: "broadcast",
+              event: "message_updated",
+              payload: { ...msg, read_at: now },
+            });
+          });
+        }
+
         await supabase
           .from("messages")
           .update({ read_at: now })
@@ -187,8 +213,31 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     const tempContent = newMessage.trim();
     setNewMessage("");
 
+    const tempId = crypto.randomUUID();
+    const tempMessage: Message = {
+      id: tempId,
+      sender_id: currentUserId,
+      receiver_id: contactId,
+      content: tempContent,
+      type: "text",
+      created_at: new Date().toISOString(),
+    };
+
+    // Optimistic UI update (Sender instantly sees it)
+    setMessages((prev) => [...prev, tempMessage]);
+
+    // Broadcast instantly to receiver
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "new_message",
+        payload: tempMessage,
+      });
+    }
+
     const { error } = await supabase.from("messages").insert([
       {
+        id: tempId,
         sender_id: currentUserId,
         receiver_id: contactId,
         content: tempContent,
@@ -199,6 +248,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     if (error) {
       console.error("Error sending message:", error);
       // Revert input on failure
+      setMessages((prev) => prev.filter(m => m.id !== tempId));
       setNewMessage(tempContent);
     }
     setSending(false);
@@ -216,11 +266,20 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   };
 
   const handleDeleteForEveryone = async (message: Message) => {
-    // Optimistic update locally
-    setMessages(prev => prev.map(m => 
-      m.id === message.id ? { ...m, is_deleted: true, content: "This message was deleted" } : m
-    ));
+    const updatedMsg = { ...message, is_deleted: true, content: "This message was deleted" };
     
+    // Optimistic update locally
+    setMessages(prev => prev.map(m => m.id === message.id ? updatedMsg : m));
+    
+    // Broadcast
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "message_updated",
+        payload: updatedMsg,
+      });
+    }
+
     await supabase
       .from("messages")
       .update({ is_deleted: true, content: "This message was deleted" })
@@ -241,9 +300,18 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
       newReactions.push({ user_id: currentUserId, emoji });
     }
 
-    setMessages((prev) => 
-      prev.map((msg) => msg.id === message.id ? { ...msg, reactions: newReactions } : msg)
-    );
+    const updatedMsg = { ...message, reactions: newReactions };
+
+    setMessages((prev) => prev.map((msg) => msg.id === message.id ? updatedMsg : msg));
+
+    // Broadcast
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "message_updated",
+        payload: updatedMsg,
+      });
+    }
 
     await supabase
       .from("messages")
