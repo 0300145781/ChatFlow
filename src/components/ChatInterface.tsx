@@ -18,6 +18,8 @@ interface Message {
   deleted_for_users?: string[];
   reactions?: { user_id: string; emoji: string }[];
   read_at?: string | null;
+  reply_to_id?: string | null;
+  reply_to?: Message | null;
 }
 
 interface ChatInterfaceProps {
@@ -37,6 +39,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   const [sending, setSending] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>("CONNECTING");
+  const [activeReply, setActiveReply] = useState<Message | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const channelRef = useRef<any>(null);
@@ -195,7 +198,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     setLoading(true);
     const { data, error } = await supabase
       .from("messages")
-      .select("*")
+      .select("*, reply_to:messages!reply_to_id(*)")
       .or(
         `and(sender_id.eq.${currentUserId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${currentUserId})`
       )
@@ -230,7 +233,12 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
       content: tempContent,
       type: "text",
       created_at: new Date().toISOString(),
+      reply_to_id: activeReply?.id || null,
+      reply_to: activeReply,
     };
+
+    // Clear reply state
+    setActiveReply(null);
 
     // Optimistic UI update (Sender instantly sees it)
     setMessages((prev) => [...prev, tempMessage]);
@@ -251,6 +259,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
         receiver_id: contactId,
         content: tempContent,
         type: "text",
+        reply_to_id: tempMessage.reply_to_id,
       },
     ]);
 
@@ -366,24 +375,46 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
                 <div className={`flex flex-col gap-1 w-full max-w-[70%] ${isMine ? "items-end" : "items-start"}`}>
                   <div className={`flex items-center gap-2 w-full ${isMine ? "flex-row-reverse" : "flex-row"}`}>
                     <div
-                      className={`relative px-5 py-3 text-[15px] leading-relaxed ${
+                      onDoubleClick={() => setActiveReply(msg)}
+                      className={`relative flex flex-col text-[15px] leading-relaxed transition-all ${
                         msg.is_deleted
-                          ? "bg-black/5 dark:bg-white/5 text-muted-foreground italic rounded-3xl border border-dashed border-border shadow-none"
+                          ? "px-5 py-3 bg-black/5 dark:bg-white/5 text-muted-foreground italic rounded-3xl border border-dashed border-border shadow-none"
                           : isMine
                           ? "bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-3xl rounded-br-sm shadow-md"
                           : "bg-white dark:bg-[#202020] text-foreground rounded-3xl rounded-bl-sm shadow-[0_2px_8px_-4px_rgba(0,0,0,0.1)] border border-border"
                       }`}
                     >
-                      {msg.is_deleted ? (
-                        <span className="flex items-center gap-2 opacity-80 text-sm">
-                          <Eraser className="w-4 h-4" />
-                          This message was deleted
-                        </span>
-                      ) : msg.type === "audio" ? (
-                        <AudioPlayer src={msg.content} />
-                      ) : (
-                        msg.content
+                      {!msg.is_deleted && msg.reply_to && (
+                        <div className={`mt-1.5 mx-1.5 mb-2 px-3 py-2 text-sm rounded-2xl border-l-4 ${
+                          isMine 
+                            ? "bg-black/10 border-white/40 text-white/90" 
+                            : "bg-black/5 dark:bg-white/5 border-primary/40 text-muted-foreground"
+                        }`}>
+                          <div className="font-semibold text-xs mb-0.5 opacity-80">
+                            {msg.reply_to.sender_id === currentUserId ? "You" : "Friend"}
+                          </div>
+                          <div className="line-clamp-2 text-xs opacity-90">
+                            {msg.reply_to.is_deleted 
+                              ? "This message was deleted" 
+                              : msg.reply_to.type === "audio" 
+                              ? "🎤 Audio Message" 
+                              : msg.reply_to.content}
+                          </div>
+                        </div>
                       )}
+
+                      <div className={`px-5 ${!msg.is_deleted && msg.reply_to ? "pb-3 pt-1" : "py-3"}`}>
+                        {msg.is_deleted ? (
+                          <span className="flex items-center gap-2 opacity-80 text-sm">
+                            <Eraser className="w-4 h-4" />
+                            This message was deleted
+                          </span>
+                        ) : msg.type === "audio" ? (
+                          <AudioPlayer src={msg.content} />
+                        ) : (
+                          msg.content
+                        )}
+                      </div>
                     </div>
 
                     {!msg.is_deleted && (
@@ -393,6 +424,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
                           isMine={isMine} 
                           onDeleteForMe={() => handleDeleteForMe(msg)}
                           onDeleteForEveryone={() => handleDeleteForEveryone(msg)}
+                          onReply={() => setActiveReply(msg)}
                         />
                       </div>
                     )}
@@ -462,12 +494,47 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
 
         <form
           onSubmit={sendMessage}
-          className="flex items-center gap-2 max-w-4xl mx-auto"
+          className="flex flex-col gap-2 max-w-4xl mx-auto w-full"
         >
-          <input
-            type="text"
-            className="flex-1 bg-input border border-border rounded-full px-6 py-3 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-[15px]"
-            placeholder="Type a message..."
+          <AnimatePresence>
+            {activeReply && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: "auto" }}
+                exit={{ opacity: 0, y: 10, height: 0 }}
+                className="w-full px-2 overflow-hidden"
+              >
+                <div className="bg-black/5 dark:bg-white/5 border border-border rounded-2xl p-3 flex items-start gap-3 backdrop-blur-sm relative group">
+                  <div className="w-1 h-full absolute left-0 top-0 bg-primary/50 rounded-l-2xl" />
+                  <div className="flex-1 min-w-0 pl-1">
+                    <div className="text-xs font-semibold text-primary/80 mb-1">
+                      Replying to {activeReply.sender_id === currentUserId ? "yourself" : "friend"}
+                    </div>
+                    <div className="text-sm text-muted-foreground line-clamp-1">
+                      {activeReply.is_deleted 
+                        ? "This message was deleted" 
+                        : activeReply.type === "audio" 
+                        ? "🎤 Audio Message" 
+                        : activeReply.content}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveReply(null)}
+                    className="w-6 h-6 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 transition-colors shrink-0"
+                  >
+                    <svg className="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="flex items-center gap-2 w-full">
+            <input
+              type="text"
+              className="flex-1 bg-input border border-border rounded-full px-6 py-3 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-[15px]"
+              placeholder="Type a message..."
             value={newMessage}
             onChange={(e) => {
               const val = e.target.value;
@@ -509,13 +576,14 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
               }
             }}
           />
-          <button
-            type="submit"
-            disabled={!newMessage.trim() || sending}
-            className="w-12 h-12 rounded-full bg-primary text-primary-foreground flex items-center justify-center disabled:opacity-50 hover:opacity-90 active:scale-95 transition-all shrink-0"
-          >
-            <Send className="w-5 h-5 ml-1" />
-          </button>
+            <button
+              type="submit"
+              disabled={!newMessage.trim() || sending}
+              className="w-12 h-12 rounded-full bg-primary text-primary-foreground flex items-center justify-center disabled:opacity-50 hover:opacity-90 active:scale-95 transition-all shrink-0"
+            >
+              <Send className="w-5 h-5 ml-1" />
+            </button>
+          </div>
         </form>
       </div>
     </div>

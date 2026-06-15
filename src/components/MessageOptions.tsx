@@ -1,15 +1,16 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { MoreVertical, Trash2, Eraser } from "lucide-react";
+import { MoreVertical, Trash2, Eraser, Reply } from "lucide-react";
 
 interface MessageOptionsProps {
   isMine: boolean;
   onDeleteForMe: () => void;
   onDeleteForEveryone: () => void;
+  onReply: () => void;
 }
 
-export default function MessageOptions({ isMine, onDeleteForMe, onDeleteForEveryone }: MessageOptionsProps) {
+export default function MessageOptions({ isMine, onDeleteForMe, onDeleteForEveryone, onReply }: MessageOptionsProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -39,6 +40,16 @@ export default function MessageOptions({ isMine, onDeleteForMe, onDeleteForEvery
 
       {isOpen && (
         <div className="absolute z-10 top-8 right-0 w-48 bg-white dark:bg-[#202020] rounded-xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.15)] border border-border overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <button
+            onClick={() => {
+              setIsOpen(false);
+              onReply();
+            }}
+            className="w-full text-left px-4 py-2.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-2"
+          >
+            <Reply className="w-4 h-4 opacity-70" />
+            Reply
+          </button>
           <button
             onClick={() => {
               setIsOpen(false);

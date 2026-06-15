@@ -119,3 +119,7 @@ create policy "Users can update messages." on messages
 alter table messages 
 add column reactions jsonb default '[]'::jsonb,
 add column read_at timestamp with time zone;
+
+-- Replies
+alter table messages
+add column reply_to_id uuid references messages(id) on delete set null;
