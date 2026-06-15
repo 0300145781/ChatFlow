@@ -25,6 +25,11 @@ interface ChatInterfaceProps {
   contactId: string;
 }
 
+// Global singleton to prevent all WebSocket race conditions during React unmounts
+let sharedChannel: any = null;
+type Listener = (event: string, payload: any) => void;
+const listeners = new Set<Listener>();
+
 export default function ChatInterface({ currentUserId, contactId }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
@@ -47,116 +52,91 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   useEffect(() => {
     fetchMessages();
 
-    const roomId = [currentUserId, contactId].sort().join("-");
-    const topic = `room_${roomId}`;
-    
-    let channel: any = null;
-    let isMounted = true;
-
-    const initRealtime = async () => {
-      // 1. Wait 200ms to allow Supabase Elixir backend to fully process any pending 'phx_leave' 
-      // messages from previous component unmounts. This completely eliminates the silent
-      // disconnect bug caused by rapid clicking between chats.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      if (!isMounted) return;
-
-      // Clean up any lingering strict-mode instances locally
-      supabase.getChannels().forEach((c) => {
-        if (c.topic === `realtime:${topic}`) {
-          supabase.removeChannel(c);
-        }
-      });
-
-      // Subscribe to new messages and presence events
-      channel = supabase
-        .channel(topic, {
+    // Initialize the global WebSocket channel EXACTLY ONCE for the entire application lifecycle
+    if (!sharedChannel) {
+      sharedChannel = supabase
+        .channel("global_chat_sync", {
           config: {
-            broadcast: { ack: true }, // Ensure broadcasts are robustly acknowledged
+            broadcast: { ack: true },
             presence: { key: currentUserId },
           },
         })
-        .on("broadcast", { event: "new_message" }, (payload) => {
-          const msg = payload.payload as Message;
+        .on("broadcast", { event: "new_message" }, (p) => {
+          listeners.forEach((l) => l("new_message", p.payload));
+        })
+        .on("broadcast", { event: "message_updated" }, (p) => {
+          listeners.forEach((l) => l("message_updated", p.payload));
+        })
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (p) => {
+          listeners.forEach((l) => l("pg_insert", p.new));
+        })
+        .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, (p) => {
+          listeners.forEach((l) => l("pg_update", p.new));
+        })
+        .on("presence", { event: "sync" }, () => {
+          listeners.forEach((l) => l("presence_sync", sharedChannel.presenceState()));
+        });
+
+      sharedChannel.subscribe((status: string) => {
+        listeners.forEach((l) => l("status", status));
+      });
+    }
+
+    channelRef.current = sharedChannel;
+
+    // Attach this specific chat room's React state to the global listener hub
+    const listener: Listener = (event, payload) => {
+      if (event === "status") {
+        setConnectionStatus(payload);
+        if (payload === "SUBSCRIBED" && sharedChannel) {
+          sharedChannel.track({ isTyping: false, updatedAt: Date.now() });
+        }
+      }
+      
+      if (event === "new_message" || event === "pg_insert") {
+        const msg = payload as Message;
+        // Only accept messages belonging to this exact chat room
+        if (
+          (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
+          (msg.sender_id === contactId && msg.receiver_id === currentUserId)
+        ) {
           setMessages((prev) => {
             if (prev.some((m) => m.id === msg.id)) return prev;
             return [...prev, msg];
           });
-        })
-        .on("broadcast", { event: "message_updated" }, (payload) => {
-          const updatedMsg = payload.payload as Message;
-          setMessages((prev) => 
-            prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
-          );
-        })
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "messages",
-          },
-          (payload) => {
-            const msg = payload.new as Message;
-            if (
-              (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
-              (msg.sender_id === contactId && msg.receiver_id === currentUserId)
-            ) {
-              setMessages((prev) => {
-                if (prev.some((m) => m.id === msg.id)) return prev;
-                return [...prev, msg];
-              });
-            }
-          }
-        )
-        .on(
-          "postgres_changes",
-          {
-            event: "UPDATE",
-            schema: "public",
-            table: "messages",
-          },
-          (payload) => {
-            const updatedMsg = payload.new as Message;
-            setMessages((prev) => 
-              prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
-            );
-          }
-        )
-        .on(
-          "presence",
-          { event: "sync" },
-          () => {
-            if (!channel) return;
-            const state = channel.presenceState();
-            const contactState = state[contactId];
-            if (contactState && contactState.length > 0) {
-              const latestState = contactState.sort(
-                (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
-              )[0];
-              setIsTyping((latestState as any).isTyping === true);
-            } else {
-              setIsTyping(false);
-            }
-          }
-        );
-
-      channel.subscribe(async (status: string) => {
-        setConnectionStatus(status);
-        if (status === "SUBSCRIBED" && channel) {
-          await channel.track({ isTyping: false, updatedAt: Date.now() });
         }
-      });
+      }
 
-      channelRef.current = channel;
+      if (event === "message_updated" || event === "pg_update") {
+        const msg = payload as Message;
+        setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
+      }
+
+      if (event === "presence_sync") {
+        const state = payload;
+        const contactState = state[contactId];
+        if (contactState && contactState.length > 0) {
+          const latestState = contactState.sort(
+            (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
+          )[0];
+          setIsTyping((latestState as any).isTyping === true);
+        } else {
+          setIsTyping(false);
+        }
+      }
     };
 
-    initRealtime();
+    listeners.add(listener);
+
+    // If already connected from a previous chat, pull the status instantly
+    if (sharedChannel.state === "joined") {
+      setConnectionStatus("SUBSCRIBED");
+      sharedChannel.track({ isTyping: false, updatedAt: Date.now() });
+    }
 
     return () => {
-      isMounted = false;
-      if (channel) {
-        supabase.removeChannel(channel);
-      }
+      // Cleanly detach the React state, but NEVER kill the WebSocket
+      listeners.delete(listener);
     };
   }, [contactId, currentUserId]);
 
