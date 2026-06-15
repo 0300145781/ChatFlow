@@ -105,7 +105,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
             const latestState = contactState.sort(
               (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
             )[0];
-            setIsTyping(latestState.isTyping === true);
+            setIsTyping((latestState as any).isTyping === true);
           } else {
             setIsTyping(false);
           }
