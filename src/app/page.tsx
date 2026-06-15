@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
 import { nanoid } from "nanoid";
@@ -12,10 +12,22 @@ export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true); // Start loading true while checking session
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const router = useRouter();
+
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        router.push("/dashboard");
+      } else {
+        setLoading(false);
+      }
+    };
+    checkSession();
+  }, [router]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,6 +108,13 @@ export default function AuthPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input type="checkbox" id="remember" className="rounded border-gray-300 text-primary focus:ring-primary" defaultChecked />
+            <label htmlFor="remember" className="text-sm text-muted-foreground cursor-pointer">
+              Remember me
+            </label>
           </div>
 
           {error && (
