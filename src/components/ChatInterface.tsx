@@ -48,95 +48,113 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
 
     const roomId = [currentUserId, contactId].sort().join("-");
     const topic = `room_${roomId}`;
+    
+    let channel: any = null;
+    let isMounted = true;
 
-    // Clean up any existing channel instance to prevent Strict Mode reuse errors
-    supabase.getChannels().forEach((c) => {
-      if (c.topic === `realtime:${topic}`) {
-        supabase.removeChannel(c);
-      }
-    });
+    const initRealtime = async () => {
+      // 1. Wait 200ms to allow Supabase Elixir backend to fully process any pending 'phx_leave' 
+      // messages from previous component unmounts. This completely eliminates the silent
+      // disconnect bug caused by rapid clicking between chats.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (!isMounted) return;
 
-    // Subscribe to new messages and presence events
-    const channel = supabase
-      .channel(topic, {
-        config: {
-          presence: { key: currentUserId },
-        },
-      })
-      .on("broadcast", { event: "new_message" }, (payload) => {
-        const msg = payload.payload as Message;
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
-      })
-      .on("broadcast", { event: "message_updated" }, (payload) => {
-        const updatedMsg = payload.payload as Message;
-        setMessages((prev) => 
-          prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
-        );
-      })
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-        },
-        (payload) => {
-          const msg = payload.new as Message;
-          if (
-            (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
-            (msg.sender_id === contactId && msg.receiver_id === currentUserId)
-          ) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === msg.id)) return prev;
-              return [...prev, msg];
-            });
-          }
+      // Clean up any lingering strict-mode instances locally
+      supabase.getChannels().forEach((c) => {
+        if (c.topic === `realtime:${topic}`) {
+          supabase.removeChannel(c);
         }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "messages",
-        },
-        (payload) => {
-          const updatedMsg = payload.new as Message;
+      });
+
+      // Subscribe to new messages and presence events
+      channel = supabase
+        .channel(topic, {
+          config: {
+            broadcast: { ack: true }, // Ensure broadcasts are robustly acknowledged
+            presence: { key: currentUserId },
+          },
+        })
+        .on("broadcast", { event: "new_message" }, (payload) => {
+          const msg = payload.payload as Message;
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [...prev, msg];
+          });
+        })
+        .on("broadcast", { event: "message_updated" }, (payload) => {
+          const updatedMsg = payload.payload as Message;
           setMessages((prev) => 
             prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
           );
-        }
-      )
-      .on(
-        "presence",
-        { event: "sync" },
-        () => {
-          const state = channel.presenceState();
-          const contactState = state[contactId];
-          if (contactState && contactState.length > 0) {
-            // Sort by most recently updated to ignore stuck ghost presences
-            const latestState = contactState.sort(
-              (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
-            )[0];
-            setIsTyping((latestState as any).isTyping === true);
-          } else {
-            setIsTyping(false);
+        })
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+          },
+          (payload) => {
+            const msg = payload.new as Message;
+            if (
+              (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
+              (msg.sender_id === contactId && msg.receiver_id === currentUserId)
+            ) {
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === msg.id)) return prev;
+                return [...prev, msg];
+              });
+            }
           }
-        }
-      )
-      .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "messages",
+          },
+          (payload) => {
+            const updatedMsg = payload.new as Message;
+            setMessages((prev) => 
+              prev.map((msg) => msg.id === updatedMsg.id ? updatedMsg : msg)
+            );
+          }
+        )
+        .on(
+          "presence",
+          { event: "sync" },
+          () => {
+            if (!channel) return;
+            const state = channel.presenceState();
+            const contactState = state[contactId];
+            if (contactState && contactState.length > 0) {
+              const latestState = contactState.sort(
+                (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
+              )[0];
+              setIsTyping((latestState as any).isTyping === true);
+            } else {
+              setIsTyping(false);
+            }
+          }
+        );
+
+      channel.subscribe(async (status: string) => {
+        if (status === "SUBSCRIBED" && channel) {
           await channel.track({ isTyping: false, updatedAt: Date.now() });
         }
       });
 
-    channelRef.current = channel;
+      channelRef.current = channel;
+    };
+
+    initRealtime();
 
     return () => {
-      supabase.removeChannel(channel);
+      isMounted = false;
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
     };
   }, [contactId, currentUserId]);
 
