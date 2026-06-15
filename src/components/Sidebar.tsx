@@ -94,7 +94,16 @@ export default function Sidebar() {
   useEffect(() => {
     if (!profile?.id) return;
     
-    const channel = supabase.channel("online-users", {
+    const topic = "online-users";
+
+    // Clean up any existing channel instance to prevent Strict Mode reuse errors
+    supabase.getChannels().forEach((c) => {
+      if (c.topic === `realtime:${topic}`) {
+        supabase.removeChannel(c);
+      }
+    });
+
+    const channel = supabase.channel(topic, {
       config: {
         presence: { key: profile.id }
       }
