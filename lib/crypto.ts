@@ -133,7 +133,7 @@ export async function encryptMessage(text: string, sharedSecret: CryptoKey, iv: 
       iv: iv as any,
     },
     sharedSecret,
-    encodedText
+    encodedText as any
   );
 
   return bufferToBase64(ciphertext);
@@ -148,7 +148,7 @@ export async function decryptMessage(ciphertextBase64: string, sharedSecret: Cry
       iv: iv as any,
     },
     sharedSecret,
-    ciphertextBuffer
+    ciphertextBuffer as any
   );
 
   const dec = new TextDecoder();
