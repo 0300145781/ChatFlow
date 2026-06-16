@@ -49,6 +49,9 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const audioOnlyRef = useRef<HTMLAudioElement | null>(null);
   
+  const incomingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const outgoingAudioRef = useRef<HTMLAudioElement | null>(null);
+  
   const pendingCandidatesRef = useRef<any[]>([]);
 
   useImperativeHandle(ref, () => ({
@@ -192,6 +195,33 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
         setCallDurationStr(`${m}:${s}`);
       }, 1000);
       return () => clearInterval(interval);
+    }
+  }, [callState]);
+
+  // Handle playing ringtones based on callState
+  useEffect(() => {
+    if (callState === "calling") {
+      if (outgoingAudioRef.current) {
+        outgoingAudioRef.current.currentTime = 0;
+        outgoingAudioRef.current.play().catch(e => console.error("Could not play outgoing ringtone", e));
+      }
+    } else {
+      if (outgoingAudioRef.current) {
+        outgoingAudioRef.current.pause();
+        outgoingAudioRef.current.currentTime = 0;
+      }
+    }
+
+    if (callState === "receiving") {
+      if (incomingAudioRef.current) {
+        incomingAudioRef.current.currentTime = 0;
+        incomingAudioRef.current.play().catch(e => console.error("Could not play incoming ringtone", e));
+      }
+    } else {
+      if (incomingAudioRef.current) {
+        incomingAudioRef.current.pause();
+        incomingAudioRef.current.currentTime = 0;
+      }
     }
   }, [callState]);
 
@@ -615,6 +645,10 @@ const CallManager = forwardRef<CallManagerRef, CallManagerProps>(({
       </AnimatePresence>
       {/* Invisible Audio Element for Audio-Only Calls */}
       {callType === "audio" && <audio ref={audioOnlyRef} autoPlay />}
+      
+      {/* Ringtone Audio Elements */}
+      <audio ref={incomingAudioRef} src="/sounds/incoming.wav" loop preload="auto" />
+      <audio ref={outgoingAudioRef} src="/sounds/outgoing.wav" loop preload="auto" />
     </>
   );
 });
