@@ -130,7 +130,7 @@ export async function encryptMessage(text: string, sharedSecret: CryptoKey, iv: 
   const ciphertext = await window.crypto.subtle.encrypt(
     {
       name: "AES-GCM",
-      iv: iv,
+      iv: iv as any,
     },
     sharedSecret,
     encodedText
@@ -145,7 +145,7 @@ export async function decryptMessage(ciphertextBase64: string, sharedSecret: Cry
   const decryptedBuffer = await window.crypto.subtle.decrypt(
     {
       name: "AES-GCM",
-      iv: iv,
+      iv: iv as any,
     },
     sharedSecret,
     ciphertextBuffer
