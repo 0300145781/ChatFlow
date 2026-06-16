@@ -28,7 +28,8 @@ export default function PushRegistration() {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session) return;
         
-        const registration = await navigator.serviceWorker.ready;
+        const registration = await navigator.serviceWorker.register('/sw.js');
+        await navigator.serviceWorker.ready;
         
         // Ask for permission if not already granted
         if (Notification.permission === 'default') {
