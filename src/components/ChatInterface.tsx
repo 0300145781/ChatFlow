@@ -7,6 +7,7 @@ import AudioPlayer from "./AudioPlayer";
 import MessageOptions from "./MessageOptions";
 import ReactionPicker from "./ReactionPicker";
 import { motion, AnimatePresence } from "framer-motion";
+import { getPrivateKey, importPublicKey, deriveSharedSecret, encryptMessage, decryptMessage } from "../../lib/crypto";
 
 interface Message {
   id: string;
@@ -21,11 +22,14 @@ interface Message {
   read_at?: string | null;
   reply_to_id?: string | null;
   reply_to?: Message | null;
+  decryptionFailed?: boolean;
 }
 
 interface ChatInterfaceProps {
   currentUserId: string;
   contactId: string;
+  currentUserPublicKey?: string | null;
+  contactPublicKey?: string | null;
 }
 
 // Global singleton to prevent all WebSocket race conditions during React unmounts
@@ -33,7 +37,7 @@ let sharedChannel: any = null;
 type Listener = (event: string, payload: any) => void;
 const listeners = new Set<Listener>();
 
-export default function ChatInterface({ currentUserId, contactId }: ChatInterfaceProps) {
+export default function ChatInterface({ currentUserId, contactId, currentUserPublicKey, contactPublicKey }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -44,6 +48,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const channelRef = useRef<any>(null);
+  const e2eKeysRef = useRef<{ mySharedSecret: CryptoKey | null, receiverSharedSecret: CryptoKey | null }>({ mySharedSecret: null, receiverSharedSecret: null });
 
   const formatTime = (dateString: string) => {
     return new Date(dateString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -53,8 +58,93 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const decryptSingleMessage = async (msg: Message) => {
+    if (!msg || !msg.content) return msg;
+
+    if (!msg.content.includes('"e2ee":true') && !msg.content.includes('"forSender":')) {
+      return msg; // Plaintext
+    }
+    
+    if (!e2eKeysRef.current.mySharedSecret && !e2eKeysRef.current.receiverSharedSecret) {
+      return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
+    }
+
+    try {
+      const parsed = JSON.parse(msg.content);
+      if (parsed.iv) {
+        const iv = new Uint8Array(parsed.iv);
+        const secret = msg.sender_id === currentUserId ? e2eKeysRef.current.mySharedSecret : e2eKeysRef.current.receiverSharedSecret;
+        
+        if (!secret) throw new Error("Missing shared secret");
+        
+        const ciphertext = msg.sender_id === currentUserId ? parsed.forSender : parsed.forReceiver;
+        const decrypted = await decryptMessage(ciphertext, secret, iv);
+        return { ...msg, content: decrypted };
+      }
+    } catch (e) {
+      console.error("Decryption failed", e);
+    }
+    
+    return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
+  };
+
+  const encryptPayload = async (text: string) => {
+    const { mySharedSecret, receiverSharedSecret } = e2eKeysRef.current;
+    if (!mySharedSecret || !receiverSharedSecret) return text; // Fallback to plaintext if keys missing
+    try {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const forSender = await encryptMessage(text, mySharedSecret, iv);
+      const forReceiver = await encryptMessage(text, receiverSharedSecret, iv);
+      return JSON.stringify({ forSender, forReceiver, iv: Array.from(iv), e2ee: true });
+    } catch (e) {
+      console.error("Encryption failed", e);
+      return text;
+    }
+  };
+
+  const fetchMessages = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*, reply_to:messages!reply_to_id(*)")
+      .or(
+        `and(sender_id.eq.${currentUserId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${currentUserId})`
+      )
+      .order("created_at", { ascending: true });
+
+    if (data) {
+      const decryptedData = await Promise.all(data.map(async msg => {
+        if (msg.reply_to) {
+          msg.reply_to = await decryptSingleMessage(msg.reply_to);
+        }
+        return await decryptSingleMessage(msg);
+      }));
+      setMessages(decryptedData);
+    }
+    setLoading(false);
+  };
+
   useEffect(() => {
-    fetchMessages();
+    const initKeysAndFetch = async () => {
+      try {
+        const myPrivKey = await getPrivateKey(currentUserId);
+        if (myPrivKey) {
+          if (currentUserPublicKey) {
+            const myPub = await importPublicKey(currentUserPublicKey);
+            e2eKeysRef.current.mySharedSecret = await deriveSharedSecret(myPrivKey, myPub);
+          }
+          if (contactPublicKey) {
+            const contactPub = await importPublicKey(contactPublicKey);
+            e2eKeysRef.current.receiverSharedSecret = await deriveSharedSecret(myPrivKey, contactPub);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to initialize E2EE keys", e);
+      }
+      await fetchMessages();
+    };
+    
+    initKeysAndFetch();
 
     // Initialize the global WebSocket channel EXACTLY ONCE for the entire application lifecycle
     if (!sharedChannel) {
@@ -107,16 +197,20 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
           (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
           (msg.sender_id === contactId && msg.receiver_id === currentUserId)
         ) {
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === msg.id)) return prev;
-            return [...prev, msg];
+          decryptSingleMessage(msg).then(decryptedMsg => {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === decryptedMsg.id)) return prev;
+              return [...prev, decryptedMsg];
+            });
           });
         }
       }
 
       if (event === "message_updated" || event === "pg_update") {
         const msg = payload as Message;
-        setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
+        decryptSingleMessage(msg).then(decryptedMsg => {
+          setMessages((prev) => prev.map((m) => (m.id === decryptedMsg.id ? decryptedMsg : m)));
+        });
       }
 
       if (event === "messages_read") {
@@ -152,7 +246,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
       // Cleanly detach the React state, but NEVER kill the WebSocket
       listeners.delete(listener);
     };
-  }, [contactId, currentUserId]);
+  }, [contactId, currentUserId, currentUserPublicKey, contactPublicKey]);
 
   useEffect(() => {
     if (!messages.length || !contactId) return;
@@ -195,20 +289,6 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     scrollToBottom();
   }, [messages]);
 
-  const fetchMessages = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*, reply_to:messages!reply_to_id(*)")
-      .or(
-        `and(sender_id.eq.${currentUserId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${currentUserId})`
-      )
-      .order("created_at", { ascending: true });
-
-    if (data) setMessages(data);
-    setLoading(false);
-  };
-
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMessage.trim()) return;
@@ -225,13 +305,15 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     setSending(true);
     const tempContent = newMessage.trim();
     setNewMessage("");
+    
+    const encryptedContent = await encryptPayload(tempContent);
 
     const tempId = crypto.randomUUID();
     const tempMessage: Message = {
       id: tempId,
       sender_id: currentUserId,
       receiver_id: contactId,
-      content: tempContent,
+      content: tempContent, // Optimistically render the plaintext version instantly
       type: "text",
       created_at: new Date().toISOString(),
       reply_to_id: activeReply?.id || null,
@@ -241,15 +323,17 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
     // Clear reply state
     setActiveReply(null);
 
-    // Optimistic UI update (Sender instantly sees it)
+    // Optimistic UI update (Sender instantly sees plaintext)
     setMessages((prev) => [...prev, tempMessage]);
 
-    // Broadcast instantly to receiver
+    // Broadcast instantly to receiver (must broadcast encrypted payload)
+    const broadcastMessage = { ...tempMessage, content: encryptedContent };
+    
     if (channelRef.current) {
       channelRef.current.send({
         type: "broadcast",
         event: "new_message",
-        payload: tempMessage,
+        payload: broadcastMessage,
       });
     }
 
@@ -258,7 +342,7 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
         id: tempId,
         sender_id: currentUserId,
         receiver_id: contactId,
-        content: tempContent,
+        content: encryptedContent,
         type: "text",
         reply_to_id: tempMessage.reply_to_id,
       },
@@ -380,6 +464,8 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
                       className={`relative flex flex-col text-[15px] leading-relaxed transition-all ${
                         msg.is_deleted
                           ? "px-5 py-3 bg-black/5 dark:bg-white/5 text-muted-foreground italic rounded-3xl border border-dashed border-border shadow-none"
+                          : msg.decryptionFailed
+                          ? "px-5 py-3 bg-red-50 dark:bg-red-950/20 text-red-500/80 dark:text-red-400/80 text-sm italic rounded-3xl border border-dashed border-red-200 dark:border-red-900 shadow-none"
                           : isMine
                           ? "bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-3xl rounded-br-sm shadow-md"
                           : "bg-white dark:bg-[#202020] text-foreground rounded-3xl rounded-bl-sm shadow-[0_2px_8px_-4px_rgba(0,0,0,0.1)] border border-border"
@@ -397,6 +483,8 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
                           <div className="line-clamp-2 text-xs opacity-90">
                             {msg.reply_to.is_deleted 
                               ? "This message was deleted" 
+                              : msg.reply_to.decryptionFailed
+                              ? "🔒 Encrypted (Key missing)"
                               : msg.reply_to.type === "audio" 
                               ? "🎤 Audio Message" 
                               : msg.reply_to.content}
@@ -514,6 +602,8 @@ export default function ChatInterface({ currentUserId, contactId }: ChatInterfac
                     <div className="text-sm text-muted-foreground line-clamp-1">
                       {activeReply.is_deleted 
                         ? "This message was deleted" 
+                        : activeReply.decryptionFailed
+                        ? "🔒 Encrypted (Key missing)"
                         : activeReply.type === "audio" 
                         ? "🎤 Audio Message" 
                         : activeReply.content}

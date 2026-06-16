@@ -5,13 +5,13 @@ import { supabase } from "../../../../lib/supabase";
 import { useRouter } from "next/navigation";
 import ChatInterface from "../../../components/ChatInterface";
 import CallManager, { CallManagerRef } from "../../../components/CallManager";
-import { User, ChevronLeft, Phone, Video } from "lucide-react";
+import { User, ChevronLeft, Phone, Video, Lock } from "lucide-react";
 import Link from "next/link";
 
 export default function ChatPage({ params }: { params: Promise<{ contactId: string }> }) {
   const resolvedParams = use(params);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [contactInfo, setContactInfo] = useState<{ name: string | null; friend_code: string; avatar_url: string | null } | null>(null);
+  const [contactInfo, setContactInfo] = useState<{ name: string | null; friend_code: string; avatar_url: string | null; public_key?: string | null } | null>(null);
   const callManagerRef = useRef<CallManagerRef>(null);
   const router = useRouter();
 
@@ -33,14 +33,26 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
 
       const { data: profileData } = await supabase
         .from("profiles")
-        .select("friend_code, avatar_url")
+        .select("friend_code, avatar_url, public_key")
         .eq("id", resolvedParams.contactId)
+        .single();
+
+      const { data: currentUserProfile } = await supabase
+        .from("profiles")
+        .select("public_key")
+        .eq("id", session.user.id)
         .single();
 
       setContactInfo({
         name: contactData?.name || null,
         friend_code: profileData?.friend_code || "Unknown",
         avatar_url: profileData?.avatar_url || null,
+        public_key: profileData?.public_key || null,
+      });
+
+      setCurrentUser({
+        ...session.user,
+        public_key: currentUserProfile?.public_key || null,
       });
     };
 
@@ -66,10 +78,15 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
             )}
           </div>
           <div>
-            <h2 className="font-medium text-foreground leading-tight">
-              {contactInfo.name || `User ${contactInfo.friend_code}`}
-            </h2>
-            <p className="text-xs text-muted-foreground font-mono">
+            <div className="flex items-center gap-1.5">
+              <h2 className="font-medium text-foreground leading-tight">
+                {contactInfo.name || `User ${contactInfo.friend_code}`}
+              </h2>
+              <div title="Messages are end-to-end encrypted. Changing devices or clearing your browser cache will cause older messages to become unreadable." className="text-green-500/80 dark:text-green-400/80 cursor-help">
+                <Lock className="w-3 h-3" />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground font-mono mt-0.5">
               #{contactInfo.friend_code}
             </p>
           </div>
@@ -95,7 +112,12 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
       </header>
       
       <div className="flex-1 min-h-0">
-        <ChatInterface currentUserId={currentUser.id} contactId={resolvedParams.contactId} />
+        <ChatInterface 
+          currentUserId={currentUser.id} 
+          contactId={resolvedParams.contactId} 
+          currentUserPublicKey={currentUser.public_key}
+          contactPublicKey={contactInfo.public_key}
+        />
       </div>
       
       <CallManager 

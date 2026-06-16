@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import Sidebar from "./Sidebar";
 import { motion, AnimatePresence } from "framer-motion";
+import PushRegistration from "./PushRegistration";
 
 export default function DashboardLayoutClient({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -10,6 +11,7 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden relative">
+      <PushRegistration />
       {/* Desktop View: Side by Side */}
       <div className="hidden md:flex w-full h-full">
         <Sidebar />

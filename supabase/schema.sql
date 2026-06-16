@@ -2,6 +2,7 @@
 create table profiles (
   id uuid references auth.users not null primary key,
   friend_code text unique not null,
+  public_key text,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
@@ -21,8 +22,8 @@ create policy "Users can update own profile." on profiles
 create function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.profiles (id, friend_code)
-  values (new.id, new.raw_user_meta_data->>'friend_code');
+  insert into public.profiles (id, friend_code, public_key)
+  values (new.id, new.raw_user_meta_data->>'friend_code', new.raw_user_meta_data->>'public_key');
   return new;
 end;
 $$ language plpgsql security definer;
@@ -141,3 +142,24 @@ create policy "Users can read their own calls." on calls
 
 create policy "Users can insert their own calls." on calls
   for insert with check (auth.uid() = caller_id);
+
+-- Push Notifications
+create table push_subscriptions (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references auth.users not null,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+alter table push_subscriptions enable row level security;
+
+create policy "Users can read own subscriptions" on push_subscriptions
+  for select using (auth.uid() = user_id);
+
+create policy "Users can insert own subscriptions" on push_subscriptions
+  for insert with check (auth.uid() = user_id);
+
+create policy "Users can delete own subscriptions" on push_subscriptions
+  for delete using (auth.uid() = user_id);
