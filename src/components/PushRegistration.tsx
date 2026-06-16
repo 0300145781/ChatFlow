@@ -24,18 +24,57 @@ export default function PushRegistration() {
   const [showBanner, setShowBanner] = useState(false);
 
   useEffect(() => {
-    // 1. Check if we already have permission, and show banner if we don't
-    if ('Notification' in window) {
-      setPermission(Notification.permission);
-      if (Notification.permission === 'default') {
+    const initPush = async () => {
+      if (!('Notification' in window)) return;
+      
+      const currentPermission = Notification.permission;
+      setPermission(currentPermission);
+      
+      if (currentPermission === 'default') {
         setShowBanner(true);
       }
-    }
-    
-    // 2. Pre-register the service worker in the background regardless of permission
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(console.error);
-    }
+
+      if ('serviceWorker' in navigator) {
+        try {
+          await navigator.serviceWorker.register('/sw.js');
+          
+          // If permission is ALREADY granted, quietly subscribe in the background
+          if (currentPermission === 'granted') {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (!session) return;
+
+            const registration = await navigator.serviceWorker.ready;
+            let subscription = await registration.pushManager.getSubscription();
+
+            if (!subscription) {
+              const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+              if (vapidPublicKey) {
+                subscription = await registration.pushManager.subscribe({
+                  userVisibleOnly: true,
+                  applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
+                });
+              }
+            }
+
+            if (subscription) {
+              const subJson = subscription.toJSON();
+              if (subJson.endpoint && subJson.keys) {
+                await supabase.from("push_subscriptions").upsert({
+                  user_id: session.user.id,
+                  endpoint: subJson.endpoint,
+                  p256dh: subJson.keys.p256dh,
+                  auth: subJson.keys.auth,
+                }, { onConflict: "endpoint" });
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Background push registration error:", err);
+        }
+      }
+    };
+
+    initPush();
   }, []);
 
   const handleEnableNotifications = async () => {
