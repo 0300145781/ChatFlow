@@ -630,6 +630,8 @@ export default function ChatInterface({ currentUserId, contactId, blockedUsers =
                         ? "🎙️ Voice Message" 
                         : activeReply.type === "image"
                         ? "📷 Media"
+                        : activeReply.content?.includes('"e2ee":true')
+                        ? "🔒 Old encrypted message"
                         : activeReply.content}
                     </div>
                   </div>

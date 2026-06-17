@@ -70,6 +70,8 @@ const MessageBubble = memo(({
                     ? "🎙️ Voice Message" 
                     : msg.reply_to.type === "image"
                     ? "📷 Media"
+                    : msg.reply_to.content?.includes('"e2ee":true')
+                    ? "🔒 Old encrypted message"
                     : msg.reply_to.content}
                 </div>
               </div>
@@ -93,6 +95,8 @@ const MessageBubble = memo(({
                 <div className="-mx-3 -my-1">
                   <img src={supabase.storage.from("voice_notes").getPublicUrl(msg.content).data.publicUrl} alt="Media" className="max-w-full rounded-2xl cursor-pointer hover:opacity-90 transition-opacity max-h-[300px] object-cover" />
                 </div>
+              ) : msg.content?.includes('"e2ee":true') ? (
+                <span className="italic opacity-80 text-sm">🔒 Old encrypted message (unavailable)</span>
               ) : (
                 msg.content
               )}
