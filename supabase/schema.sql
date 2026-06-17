@@ -3,6 +3,7 @@ create table profiles (
   id uuid references auth.users not null primary key,
   friend_code text unique not null,
   name text,
+  bio text,
   avatar_url text,
   public_key text,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null

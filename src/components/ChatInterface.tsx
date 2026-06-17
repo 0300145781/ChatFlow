@@ -2,34 +2,28 @@
 
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "../../lib/supabase";
-import { Send, Loader2, Eraser, Check, CheckCheck } from "lucide-react";
+import { Send, Loader2, Eraser, Check, CheckCheck, Paperclip, User } from "lucide-react";
 import AudioPlayer from "./AudioPlayer";
 import MessageOptions from "./MessageOptions";
 import ReactionPicker from "./ReactionPicker";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPrivateKey, importPublicKey, deriveSharedSecret, encryptMessage, decryptMessage } from "../../lib/crypto";
+import { getPrivateKey, importPublicKey, deriveSharedSecret, encryptMessage, decryptMessage, encryptFile, decryptFile } from "../../lib/crypto";
+import { useSettings } from "../hooks/useSettings";
+import MessageBubble from "./MessageBubble";
+import EncryptedMedia from "./EncryptedMedia";
+import { Message } from "../types";
 
-interface Message {
-  id: string;
-  sender_id: string;
-  receiver_id: string;
-  content: string;
-  type: string;
-  created_at: string;
-  is_deleted?: boolean;
-  deleted_for_users?: string[];
-  reactions?: { user_id: string; emoji: string }[];
-  read_at?: string | null;
-  reply_to_id?: string | null;
-  reply_to?: Message | null;
-  decryptionFailed?: boolean;
-}
+
+
+
 
 interface ChatInterfaceProps {
   currentUserId: string;
   contactId: string;
   currentUserPublicKey?: string | null;
   contactPublicKey?: string | null;
+  blockedUsers?: string[];
+  isGroup?: boolean;
 }
 
 // Global singleton to prevent all WebSocket race conditions during React unmounts
@@ -37,7 +31,7 @@ let sharedChannel: any = null;
 type Listener = (event: string, payload: any) => void;
 const listeners = new Set<Listener>();
 
-export default function ChatInterface({ currentUserId, contactId, currentUserPublicKey, contactPublicKey }: ChatInterfaceProps) {
+export default function ChatInterface({ currentUserId, contactId, currentUserPublicKey, contactPublicKey, blockedUsers = [], isGroup = false }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -45,10 +39,17 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
   const [isTyping, setIsTyping] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>("CONNECTING");
   const [activeReply, setActiveReply] = useState<Message | null>(null);
+  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const channelRef = useRef<any>(null);
-  const e2eKeysRef = useRef<{ mySharedSecret: CryptoKey | null, receiverSharedSecret: CryptoKey | null }>({ mySharedSecret: null, receiverSharedSecret: null });
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const e2eKeysRef = useRef<{ mySharedSecret: CryptoKey | null, receiverSharedSecret: CryptoKey | null, groupSharedSecret: CryptoKey | null }>({ mySharedSecret: null, receiverSharedSecret: null, groupSharedSecret: null });
+  const [myAvatarUrl, setMyAvatarUrl] = useState<string | null>(null);
+  const [isAITyping, setIsAITyping] = useState(false);
+
+  const { settings } = useSettings();
 
   const formatTime = (dateString: string) => {
     return new Date(dateString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -58,13 +59,42 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  useEffect(() => {
+    supabase.from("profiles").select("avatar_url").eq("id", currentUserId).single().then(({ data }) => {
+      if (data) setMyAvatarUrl(data.avatar_url);
+    });
+  }, [currentUserId]);
+
+  useEffect(() => {
+    const handleGlobalClick = () => setActiveMessageId(null);
+    document.addEventListener("click", handleGlobalClick);
+    return () => document.removeEventListener("click", handleGlobalClick);
+  }, []);
+
   const decryptSingleMessage = async (msg: Message) => {
     if (!msg || !msg.content) return msg;
 
-    if (!msg.content.includes('"e2ee":true') && !msg.content.includes('"forSender":')) {
+    if (!msg.content.includes('"e2ee":true') && !msg.content.includes('"forSender":') && !msg.content.includes('"forGroup":')) {
       return msg; // Plaintext
     }
     
+    if (msg.group_id) {
+      if (!e2eKeysRef.current.groupSharedSecret) {
+        return { ...msg, content: "🔒 Message encrypted (Group key missing)", decryptionFailed: true };
+      }
+      try {
+        const parsed = JSON.parse(msg.content);
+        if (parsed.iv && parsed.forGroup) {
+          const iv = new Uint8Array(parsed.iv);
+          const decrypted = await decryptMessage(parsed.forGroup, e2eKeysRef.current.groupSharedSecret, iv);
+          return { ...msg, content: decrypted, is_ai: parsed.is_ai };
+        }
+      } catch (e) {
+        console.warn("Group decryption failed.");
+      }
+      return { ...msg, content: "🔒 Message encrypted (Decryption failed)", decryptionFailed: true };
+    }
+
     if (!e2eKeysRef.current.mySharedSecret && !e2eKeysRef.current.receiverSharedSecret) {
       return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
     }
@@ -79,16 +109,30 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
         
         const ciphertext = msg.sender_id === currentUserId ? parsed.forSender : parsed.forReceiver;
         const decrypted = await decryptMessage(ciphertext, secret, iv);
-        return { ...msg, content: decrypted };
+        return { ...msg, content: decrypted, is_ai: parsed.is_ai };
       }
     } catch (e) {
-      console.error("Decryption failed", e);
+      // Expected behavior if keys don't match or ciphertext is corrupted
+      console.warn("Decryption failed for a message (likely due to missing/changed keys).");
     }
     
     return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
   };
 
   const encryptPayload = async (text: string) => {
+    if (isGroup) {
+      const groupSecret = e2eKeysRef.current.groupSharedSecret;
+      if (!groupSecret) return text;
+      try {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const forGroup = await encryptMessage(text, groupSecret, iv);
+        return JSON.stringify({ forGroup, iv: Array.from(iv), e2ee: true, isGroup: true });
+      } catch (e) {
+        console.error("Group encryption failed", e);
+        return text;
+      }
+    }
+
     const { mySharedSecret, receiverSharedSecret } = e2eKeysRef.current;
     if (!mySharedSecret || !receiverSharedSecret) return text; // Fallback to plaintext if keys missing
     try {
@@ -104,13 +148,17 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
 
   const fetchMessages = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*, reply_to:messages!reply_to_id(*)")
-      .or(
+    let query = supabase.from("messages").select("*, reply_to:messages!reply_to_id(*)");
+    
+    if (isGroup) {
+      query = query.eq("group_id", contactId);
+    } else {
+      query = query.or(
         `and(sender_id.eq.${currentUserId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${currentUserId})`
-      )
-      .order("created_at", { ascending: true });
+      );
+    }
+
+    const { data, error } = await query.order("created_at", { ascending: true });
 
     if (data) {
       const decryptedData = await Promise.all(data.map(async msg => {
@@ -129,13 +177,28 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       try {
         const myPrivKey = await getPrivateKey(currentUserId);
         if (myPrivKey) {
-          if (currentUserPublicKey) {
-            const myPub = await importPublicKey(currentUserPublicKey);
-            e2eKeysRef.current.mySharedSecret = await deriveSharedSecret(myPrivKey, myPub);
-          }
-          if (contactPublicKey) {
-            const contactPub = await importPublicKey(contactPublicKey);
-            e2eKeysRef.current.receiverSharedSecret = await deriveSharedSecret(myPrivKey, contactPub);
+          if (isGroup) {
+            // Fetch group key
+            const { data: keyData } = await supabase.from("group_keys").select("encrypted_key").eq("group_id", contactId).eq("user_id", currentUserId).single();
+            if (keyData) {
+              const parsed = JSON.parse(keyData.encrypted_key);
+              const { data: encryptorData } = await supabase.from("profiles").select("public_key").eq("id", parsed.encrypted_by).single();
+              if (encryptorData?.public_key) {
+                const encryptorPub = await importPublicKey(encryptorData.public_key);
+                const sharedWithEncryptor = await deriveSharedSecret(myPrivKey, encryptorPub);
+                const { decryptGroupKeyFromUser } = await import("../../lib/crypto");
+                e2eKeysRef.current.groupSharedSecret = await decryptGroupKeyFromUser(parsed.key, sharedWithEncryptor, new Uint8Array(parsed.iv));
+              }
+            }
+          } else {
+            if (currentUserPublicKey) {
+              const myPub = await importPublicKey(currentUserPublicKey);
+              e2eKeysRef.current.mySharedSecret = await deriveSharedSecret(myPrivKey, myPub);
+            }
+            if (contactPublicKey) {
+              const contactPub = await importPublicKey(contactPublicKey);
+              e2eKeysRef.current.receiverSharedSecret = await deriveSharedSecret(myPrivKey, contactPub);
+            }
           }
         }
       } catch (e) {
@@ -148,6 +211,12 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
 
     // Initialize the global WebSocket channel EXACTLY ONCE for the entire application lifecycle
     if (!sharedChannel) {
+      // Handle Next.js Fast Refresh where module state clears but Supabase client retains channels
+      const existing = supabase.getChannels().find((c: any) => c.topic === "realtime:global_chat_sync");
+      if (existing) {
+        supabase.removeChannel(existing);
+      }
+
       sharedChannel = supabase
         .channel("global_chat_sync", {
           config: {
@@ -192,18 +261,27 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       
       if (event === "new_message" || event === "pg_insert") {
         const msg = payload as Message;
+        // Ignore messages from blocked users
+        if (blockedUsers.includes(msg.sender_id)) return;
+        
         // Only accept messages belonging to this exact chat room
-        if (
-          (msg.sender_id === currentUserId && msg.receiver_id === contactId) ||
-          (msg.sender_id === contactId && msg.receiver_id === currentUserId)
-        ) {
+        if (isGroup) {
+          if (msg.group_id !== contactId) return;
+        } else {
+          if (msg.group_id) return;
+          if (
+            !(msg.sender_id === currentUserId && msg.receiver_id === contactId) &&
+            !(msg.sender_id === contactId && msg.receiver_id === currentUserId)
+          ) {
+            return;
+          }
+        }
           decryptSingleMessage(msg).then(decryptedMsg => {
             setMessages((prev) => {
               if (prev.some((m) => m.id === decryptedMsg.id)) return prev;
               return [...prev, decryptedMsg];
             });
           });
-        }
       }
 
       if (event === "message_updated" || event === "pg_update") {
@@ -221,6 +299,10 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       }
 
       if (event === "presence_sync") {
+        if (blockedUsers.includes(contactId)) {
+          setIsTyping(false);
+          return;
+        }
         const state = payload;
         const contactState = state[contactId];
         if (contactState && contactState.length > 0) {
@@ -246,7 +328,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       // Cleanly detach the React state, but NEVER kill the WebSocket
       listeners.delete(listener);
     };
-  }, [contactId, currentUserId, currentUserPublicKey, contactPublicKey]);
+  }, [contactId, currentUserId, currentUserPublicKey, contactPublicKey, blockedUsers]);
 
   useEffect(() => {
     if (!messages.length || !contactId) return;
@@ -312,7 +394,8 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     const tempMessage: Message = {
       id: tempId,
       sender_id: currentUserId,
-      receiver_id: contactId,
+      receiver_id: isGroup ? null as any : contactId,
+      group_id: isGroup ? contactId : null,
       content: tempContent, // Optimistically render the plaintext version instantly
       type: "text",
       created_at: new Date().toISOString(),
@@ -341,7 +424,8 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       {
         id: tempId,
         sender_id: currentUserId,
-        receiver_id: contactId,
+        receiver_id: isGroup ? null : contactId,
+        group_id: isGroup ? contactId : null,
         content: encryptedContent,
         type: "text",
         reply_to_id: tempMessage.reply_to_id,
@@ -353,8 +437,184 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       // Revert input on failure
       setMessages((prev) => prev.filter(m => m.id !== tempId));
       setNewMessage(tempContent);
+    } else {
+      // Invoke Push Notification instantly
+      supabase.functions.invoke('send-push', {
+        body: {
+          record: {
+            id: tempId,
+            sender_id: currentUserId,
+            receiver_id: isGroup ? null : contactId,
+            group_id: isGroup ? contactId : null,
+          }
+        }
+      }).catch(err => console.error("Push invocation failed", err));
+
+      // Check if we need to call AI
+      if (contactId === '00000000-0000-0000-0000-000000000000' || tempContent.includes("@AI")) {
+        callAI(tempContent, tempMessage.id);
+      }
     }
     setSending(false);
+  };
+
+  const callAI = async (prompt: string, replyToId: string | null) => {
+    setIsAITyping(true);
+    
+    // Prepare history
+    const history = messages.slice(-10).map(m => ({
+      role: m.sender_id === currentUserId ? "user" : "assistant",
+      content: m.content
+    }));
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: prompt, history })
+      });
+      const data = await res.json();
+      
+      let aiResponseText = data.reply;
+      
+      if (!res.ok || !data.reply) {
+        aiResponseText = "⚠️ Sorry, I couldn't connect to my brain. (Check if your GROQ_API_KEY is in .env.local and restart the server!)";
+      }
+
+      // We have the AI's reply. Let's insert it!
+      let aiEncryptedContent = aiResponseText;
+      let finalSenderId = '00000000-0000-0000-0000-000000000000';
+      let finalReceiverId = isGroup ? null : currentUserId;
+      
+      if (isGroup && e2eKeysRef.current.groupSharedSecret) {
+        try {
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const forGroup = await encryptMessage(aiResponseText, e2eKeysRef.current.groupSharedSecret, iv);
+          aiEncryptedContent = JSON.stringify({ forGroup, iv: Array.from(iv), e2ee: true, isGroup: true, is_ai: true });
+        } catch (e) {
+          console.error("AI Group encryption failed", e);
+        }
+      } else if (!isGroup && contactId !== '00000000-0000-0000-0000-000000000000') {
+        // 1-on-1 chat with a friend! We must insert as the current user so it stays in the chat room
+        finalSenderId = currentUserId;
+        finalReceiverId = contactId;
+        if (e2eKeysRef.current.mySharedSecret && e2eKeysRef.current.receiverSharedSecret) {
+          try {
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const forSender = await encryptMessage(aiResponseText, e2eKeysRef.current.mySharedSecret, iv);
+            const forReceiver = await encryptMessage(aiResponseText, e2eKeysRef.current.receiverSharedSecret, iv);
+            aiEncryptedContent = JSON.stringify({ forSender, forReceiver, iv: Array.from(iv), e2ee: true, is_ai: true });
+          } catch (e) {
+            console.error("AI 1-on-1 encryption failed", e);
+          }
+        }
+      }
+
+      await supabase.from("messages").insert([{
+        sender_id: finalSenderId,
+        receiver_id: finalReceiverId,
+        group_id: isGroup ? contactId : null,
+        content: aiEncryptedContent,
+        type: "text",
+        reply_to_id: replyToId,
+      }]);
+    } catch (e) {
+      console.error("AI call failed:", e);
+    } finally {
+      setIsAITyping(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // Check max size (e.g. 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert("File is too large! Maximum 5MB.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setUploadingMedia(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      
+      const mySharedSecret = isGroup ? e2eKeysRef.current.groupSharedSecret : e2eKeysRef.current.mySharedSecret;
+      if (!mySharedSecret) throw new Error("Encryption key not ready");
+      
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encryptedData = await encryptFile(buffer, mySharedSecret, iv);
+      
+      // Merge IV and encryptedData
+      const finalBuffer = new Uint8Array(12 + encryptedData.byteLength);
+      finalBuffer.set(iv, 0);
+      finalBuffer.set(new Uint8Array(encryptedData), 12);
+      
+      const path = `${currentUserId}/media/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '')}`;
+      
+      const { error: uploadError } = await supabase.storage.from("voice_notes").upload(path, finalBuffer, {
+        contentType: "application/octet-stream"
+      });
+      
+      if (uploadError) throw uploadError;
+      
+      // Send message
+      const tempId = crypto.randomUUID();
+      const newMsg: Message = {
+        id: tempId,
+        sender_id: currentUserId,
+        receiver_id: isGroup ? null as any : contactId,
+        group_id: isGroup ? contactId : null,
+        content: path,
+        type: "image",
+        created_at: new Date().toISOString(),
+        reply_to_id: activeReply?.id || null,
+        reply_to: activeReply,
+      };
+      
+      setActiveReply(null);
+      setMessages(prev => [...prev, newMsg]);
+      
+      if (channelRef.current) {
+        channelRef.current.send({
+          type: "broadcast",
+          event: "new_message",
+          payload: newMsg,
+        });
+      }
+      
+      const { error: dbError } = await supabase.from("messages").insert([{
+        id: tempId,
+        sender_id: currentUserId,
+        receiver_id: isGroup ? null : contactId,
+        group_id: isGroup ? contactId : null,
+        content: path,
+        type: "image",
+        reply_to_id: newMsg.reply_to_id,
+      }]);
+
+      if (dbError) throw dbError;
+      
+      // Invoke Push Notification instantly
+      supabase.functions.invoke('send-push', {
+        body: {
+          record: {
+            id: tempId,
+            sender_id: currentUserId,
+            receiver_id: isGroup ? null : contactId,
+            group_id: isGroup ? contactId : null,
+          }
+        }
+      }).catch(err => console.error("Push invocation failed", err));
+
+    } catch (err: any) {
+      console.error("Upload failed", err);
+      alert("Failed to send media: " + err.message);
+    } finally {
+      setUploadingMedia(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const handleDeleteForMe = async (message: Message) => {
@@ -430,8 +690,27 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     );
   }
 
+  // Map wallpaper ID to class
+  const getWallpaperClass = () => {
+    switch (settings.wallpaper) {
+      case "gradient-1": return "bg-gradient-to-br from-indigo-500/20 via-purple-500/20 to-pink-500/20";
+      case "gradient-2": return "bg-gradient-to-br from-cyan-500/20 to-blue-500/20";
+      case "gradient-3": return "bg-gradient-to-br from-orange-500/20 to-red-500/20";
+      case "solid-dark": return "bg-[#111]";
+      case "solid-light": return "bg-[#f5f5f5]";
+      default: return "bg-background";
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full bg-[#fcfcfc] dark:bg-[#111111] relative">
+    <div className={`flex flex-col h-full relative ${getWallpaperClass()}`}>
+      {(settings.customWallpaperUrl || settings.wallpaper.startsWith("http")) && (
+        <div 
+          className="absolute inset-0 z-0 opacity-30 pointer-events-none bg-cover bg-center" 
+          style={{ backgroundImage: `url(${settings.customWallpaperUrl || settings.wallpaper})` }} 
+        />
+      )}
+
       {/* WebSocket Debug Indicator (Temporary) */}
       {connectionStatus !== "SUBSCRIBED" && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full shadow-lg font-bold">
@@ -439,146 +718,51 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 md:space-y-6">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             No messages yet. Say hi!
           </div>
         ) : (
           messages.map((msg) => {
-            const isMine = msg.sender_id === currentUserId;
+            const isMine = msg.sender_id === currentUserId && !msg.is_ai;
             // Hide message if deleted for this user
             if (msg.deleted_for_users?.includes(currentUserId)) return null;
 
             return (
-              <div
+              <MessageBubble
                 key={msg.id}
-                className={`flex w-full group ${
-                  isMine ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div className={`flex flex-col gap-1 w-full max-w-[70%] ${isMine ? "items-end" : "items-start"}`}>
-                  <div className={`flex items-center gap-2 w-full ${isMine ? "flex-row-reverse" : "flex-row"}`}>
-                    <div
-                      onDoubleClick={() => setActiveReply(msg)}
-                      className={`relative flex flex-col text-[15px] leading-relaxed transition-all ${
-                        msg.is_deleted
-                          ? "px-5 py-3 bg-black/5 dark:bg-white/5 text-muted-foreground italic rounded-3xl border border-dashed border-border shadow-none"
-                          : msg.decryptionFailed
-                          ? "px-5 py-3 bg-red-50 dark:bg-red-950/20 text-red-500/80 dark:text-red-400/80 text-sm italic rounded-3xl border border-dashed border-red-200 dark:border-red-900 shadow-none"
-                          : isMine
-                          ? "bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-3xl rounded-br-sm shadow-md"
-                          : "bg-white dark:bg-[#202020] text-foreground rounded-3xl rounded-bl-sm shadow-[0_2px_8px_-4px_rgba(0,0,0,0.1)] border border-border"
-                      }`}
-                    >
-                      {!msg.is_deleted && msg.reply_to && (
-                        <div className={`mt-1.5 mx-1.5 mb-2 px-3 py-2 text-sm rounded-2xl border-l-4 ${
-                          isMine 
-                            ? "bg-black/10 border-white/40 text-white/90" 
-                            : "bg-black/5 dark:bg-white/5 border-primary/40 text-muted-foreground"
-                        }`}>
-                          <div className="font-semibold text-xs mb-0.5 opacity-80">
-                            {msg.reply_to.sender_id === currentUserId ? "You" : "Friend"}
-                          </div>
-                          <div className="line-clamp-2 text-xs opacity-90">
-                            {msg.reply_to.is_deleted 
-                              ? "This message was deleted" 
-                              : msg.reply_to.decryptionFailed
-                              ? "🔒 Encrypted (Key missing)"
-                              : msg.reply_to.type === "audio" 
-                              ? "🎤 Audio Message" 
-                              : msg.reply_to.content}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className={`px-5 ${!msg.is_deleted && msg.reply_to ? "pb-3 pt-1" : "py-3"}`}>
-                        {msg.is_deleted ? (
-                          <span className="flex items-center gap-2 opacity-80 text-sm">
-                            <Eraser className="w-4 h-4" />
-                            This message was deleted
-                          </span>
-                        ) : msg.type === "audio" ? (
-                          <AudioPlayer src={msg.content} />
-                        ) : (
-                          msg.content
-                        )}
-                      </div>
-                    </div>
-
-                    {!msg.is_deleted && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <ReactionPicker onSelect={(emoji) => handleReaction(msg, emoji)} />
-                        <MessageOptions 
-                          isMine={isMine} 
-                          onDeleteForMe={() => handleDeleteForMe(msg)}
-                          onDeleteForEveryone={() => handleDeleteForEveryone(msg)}
-                          onReply={() => setActiveReply(msg)}
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Reactions Cluster */}
-                  {!msg.is_deleted && msg.reactions && msg.reactions.length > 0 && (
-                    <div className={`flex flex-wrap gap-1 ${isMine ? "justify-end mr-4" : "justify-start ml-4"}`}>
-                      {Object.entries(
-                        msg.reactions.reduce((acc, curr) => {
-                          acc[curr.emoji] = (acc[curr.emoji] || 0) + 1;
-                          return acc;
-                        }, {} as Record<string, number>)
-                      ).map(([emoji, count]) => {
-                        const iReacted = msg.reactions?.some(r => r.user_id === currentUserId && r.emoji === emoji);
-                        return (
-                          <button
-                            key={emoji}
-                            onClick={() => handleReaction(msg, emoji)}
-                            className={`flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border transition-all ${
-                              iReacted 
-                                ? "bg-primary/10 border-primary/20 text-primary" 
-                                : "bg-white dark:bg-[#202020] border-border text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5"
-                            }`}
-                          >
-                            <span>{emoji}</span>
-                            {count > 1 && <span>{count}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Timestamp and Read Receipts */}
-                  <div className={`flex items-center gap-1.5 text-[11px] text-muted-foreground ${isMine ? "mr-2" : "ml-2"}`}>
-                    {formatTime(msg.created_at)}
-                    {isMine && !msg.is_deleted && (
-                      msg.read_at ? (
-                        <CheckCheck className="w-3.5 h-3.5 text-blue-500" />
-                      ) : (
-                        <Check className="w-3.5 h-3.5 opacity-70" />
-                      )
-                    )}
-                  </div>
-                </div>
-              </div>
+                msg={msg}
+                currentUserId={currentUserId}
+                isMine={isMine}
+                activeMessageId={activeMessageId}
+                e2eKeysRef={e2eKeysRef}
+                setActiveReply={setActiveReply}
+                setActiveMessageId={setActiveMessageId}
+                handleReaction={handleReaction}
+                handleDeleteForMe={handleDeleteForMe}
+                handleDeleteForEveryone={handleDeleteForEveryone}
+                formatTime={formatTime}
+              />
             );
           })
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="p-4 bg-white dark:bg-[#151515] border-t border-border relative">
+      <div className="p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-white dark:bg-[#151515] border-t border-border relative">
         {/* Presence Typing Indicator */}
         <div 
-          className={`absolute -top-7 left-6 flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-all duration-300 ${
-            isTyping ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"
+          className={`flex gap-2 items-center text-xs text-muted-foreground transition-all duration-300 absolute bottom-4 left-6 ${
+            isTyping || isAITyping ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"
           }`}
         >
-          Friend is typing
-          <span className="flex gap-0.5">
-            <span className="w-1 h-1 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-1 h-1 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-1 h-1 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </span>
+          <div className="flex gap-1">
+            <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+          </div>
+          <span>{isAITyping ? "AI is typing..." : "typing..."}</span>
         </div>
 
         <form
@@ -612,6 +796,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
                   <button
                     type="button"
                     onClick={() => setActiveReply(null)}
+                    aria-label="Cancel reply"
                     className="w-6 h-6 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 transition-colors shrink-0"
                   >
                     <svg className="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
@@ -622,12 +807,55 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
           </AnimatePresence>
 
           <div className="flex items-center gap-2 w-full">
+            <div className="relative shrink-0 hidden sm:block">
+              {myAvatarUrl ? (
+                <img src={myAvatarUrl} alt="My Avatar" className="w-10 h-10 rounded-full object-cover border border-border shadow-sm" />
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center border border-border shadow-sm">
+                  <User className="w-5 h-5 text-primary" />
+                </div>
+              )}
+              <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-background" />
+            </div>
+            
+            <input 
+              type="file" 
+              accept="image/*,video/*,application/pdf"
+              className="hidden" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingMedia}
+              aria-label="Attach media"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-muted-foreground hover:bg-input hover:text-foreground transition-all shrink-0 disabled:opacity-50"
+            >
+              {uploadingMedia ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5" />}
+            </button>
             <input
               type="text"
               className="flex-1 bg-input border border-border rounded-full px-6 py-3 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-[15px]"
               placeholder="Type a message..."
-            value={newMessage}
-            onChange={(e) => {
+              value={newMessage}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (!settings.sendOnEnter && !e.shiftKey) {
+                    e.preventDefault();
+                  } else if (!settings.sendOnEnter && e.shiftKey) {
+                    e.preventDefault();
+                    if (newMessage.trim()) {
+                      const form = e.currentTarget.closest("form");
+                      if (form) form.requestSubmit();
+                    }
+                  } else if (settings.sendOnEnter && !e.shiftKey) {
+                  } else if (settings.sendOnEnter && e.shiftKey) {
+                    e.preventDefault();
+                  }
+                }
+              }}
+              onChange={(e) => {
               const val = e.target.value;
               setNewMessage(val);
 
@@ -670,6 +898,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
             <button
               type="submit"
               disabled={!newMessage.trim() || sending}
+              aria-label="Send message"
               className="w-12 h-12 rounded-full bg-primary text-primary-foreground flex items-center justify-center disabled:opacity-50 hover:opacity-90 active:scale-95 transition-all shrink-0"
             >
               <Send className="w-5 h-5 ml-1" />

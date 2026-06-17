@@ -10,7 +10,7 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
   const isChatView = pathname !== "/dashboard";
 
   return (
-    <div className="flex h-screen bg-background text-foreground overflow-hidden relative">
+    <div className="flex h-[100dvh] bg-background text-foreground overflow-hidden relative">
       <PushRegistration />
       {/* Desktop View: Side by Side */}
       <div className="hidden md:flex w-full h-full">

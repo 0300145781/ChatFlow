@@ -5,12 +5,13 @@ import { MoreVertical, Trash2, Eraser, Reply } from "lucide-react";
 
 interface MessageOptionsProps {
   isMine: boolean;
+  isActive?: boolean;
   onDeleteForMe: () => void;
   onDeleteForEveryone: () => void;
   onReply: () => void;
 }
 
-export default function MessageOptions({ isMine, onDeleteForMe, onDeleteForEveryone, onReply }: MessageOptionsProps) {
+export default function MessageOptions({ isMine, isActive = false, onDeleteForMe, onDeleteForEveryone, onReply }: MessageOptionsProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -31,8 +32,13 @@ export default function MessageOptions({ isMine, onDeleteForMe, onDeleteForEvery
   return (
     <div className="relative" ref={dropdownRef}>
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-8 h-8 rounded-full flex items-center justify-center text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 opacity-0 group-hover:opacity-100 transition-all focus:opacity-100"
+        onClick={(e) => {
+          e.stopPropagation();
+          setIsOpen(!isOpen);
+        }}
+        className={`w-8 h-8 rounded-full flex items-center justify-center text-muted-foreground transition-all hover:bg-black/5 dark:hover:bg-white/5 ${
+          isActive || isOpen ? "opacity-100" : "opacity-0 md:group-hover:opacity-100"
+        }`}
         title="Message options"
       >
         <MoreVertical className="w-4 h-4" />

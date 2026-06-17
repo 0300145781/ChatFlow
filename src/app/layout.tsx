@@ -15,11 +15,24 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChatFlow",
-  description: "A minimal, modern chat application",
+  title: "ChatFlow | Next-Gen Secure Messaging",
+  description: "A beautifully fast, secure, and minimal real-time chat application with integrated AI.",
   manifest: "/manifest.json",
   icons: {
     apple: "/apple-touch-icon.png",
+  },
+  openGraph: {
+    title: "ChatFlow",
+    description: "A beautifully fast, secure, and minimal real-time chat application with integrated AI.",
+    url: "https://chatflow.app",
+    siteName: "ChatFlow",
+    locale: "en_US",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ChatFlow",
+    description: "A beautifully fast, secure, and minimal real-time chat application with integrated AI.",
   },
   appleWebApp: {
     capable: true,

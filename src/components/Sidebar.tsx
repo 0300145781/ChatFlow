@@ -2,21 +2,24 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import { Copy, Check, Plus, User, LogOut, Pencil, MessageSquare, Phone, PhoneMissed, PhoneOutgoing, PhoneIncoming } from "lucide-react";
+import { Copy, Check, Plus, User, Users, LogOut, Pencil, MessageSquare, Phone, PhoneMissed, PhoneOutgoing, PhoneIncoming } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import AddContactModal from "./AddContactModal";
 import RenameContactModal from "./RenameContactModal";
 import UserSettingsModal from "./UserSettingsModal";
+import CreateGroupModal from "./CreateGroupModal";
 
 export default function Sidebar() {
   const [view, setView] = useState<"chats" | "calls">("chats");
   const [profile, setProfile] = useState<any>(null);
   const [contacts, setContacts] = useState<any[]>([]);
+  const [groups, setGroups] = useState<any[]>([]);
   const [calls, setCalls] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [editingContact, setEditingContact] = useState<{ id: string; name: string } | null>(null);
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
@@ -40,6 +43,8 @@ export default function Sidebar() {
       setProfile(profileData);
     }
 
+    const blockedUsers: string[] = session.user.user_metadata?.blocked_users || [];
+
     // Fetch contacts
     const { data: contactsData, error: contactsError } = await supabase
       .from("contacts")
@@ -56,57 +61,85 @@ export default function Sidebar() {
 
     const userIdsToFetch = new Set<string>();
     if (contactsData) {
-      contactsData.forEach(c => userIdsToFetch.add(c.contact_user_id));
+      contactsData.forEach(c => {
+        if (!blockedUsers.includes(c.contact_user_id)) {
+          userIdsToFetch.add(c.contact_user_id);
+        }
+      });
     }
     if (callsData) {
       callsData.forEach(c => {
-        if (c.caller_id !== session.user.id) userIdsToFetch.add(c.caller_id);
-        if (c.receiver_id !== session.user.id) userIdsToFetch.add(c.receiver_id);
+        if (c.caller_id !== session.user.id && !blockedUsers.includes(c.caller_id)) userIdsToFetch.add(c.caller_id);
+        if (c.receiver_id !== session.user.id && !blockedUsers.includes(c.receiver_id)) userIdsToFetch.add(c.receiver_id);
       });
+    }
+
+    // Fetch groups
+    const { data: groupMembersData } = await supabase
+      .from("group_members")
+      .select("group_id, groups(id, name, avatar_url)")
+      .eq("user_id", session.user.id);
+
+    if (groupMembersData) {
+      setGroups(groupMembersData.map((gm: any) => ({
+        id: gm.groups.id,
+        contact_id: gm.groups.id, // we overload contact_id for routing
+        name: gm.groups.name,
+        avatar_url: gm.groups.avatar_url,
+        is_group: true
+      })));
     }
 
     let profilesData: any[] = [];
     if (userIdsToFetch.size > 0) {
       const { data } = await supabase
         .from("profiles")
-        .select("id, friend_code, avatar_url")
+        .select("id, friend_code, avatar_url, bio, name")
         .in("id", Array.from(userIdsToFetch));
       if (data) profilesData = data;
     }
 
     if (contactsData) {
       setContacts(
-        contactsData.map((c) => {
-          const p = profilesData.find((p) => p.id === c.contact_user_id);
-          return {
-            id: c.id,
-            contact_id: c.contact_user_id,
-            name: c.name,
-            friend_code: p?.friend_code || "Unknown",
-            avatar_url: p?.avatar_url || null,
-          };
-        })
+        contactsData
+          .filter((c) => !blockedUsers.includes(c.contact_user_id))
+          .map((c) => {
+            const p = profilesData.find((p) => p.id === c.contact_user_id);
+            return {
+              id: c.id,
+              contact_id: c.contact_user_id,
+              name: c.name || p?.name,
+              friend_code: p?.friend_code || "Unknown",
+              avatar_url: p?.avatar_url || null,
+              bio: p?.bio || null,
+            };
+          })
       );
     }
 
     if (callsData) {
       setCalls(
-        callsData.map((c) => {
-          const otherId = c.caller_id === session.user.id ? c.receiver_id : c.caller_id;
-          const p = profilesData.find((profile) => profile.id === otherId);
-          const contact = contactsData?.find((cont) => cont.contact_user_id === otherId);
-          return {
-            id: c.id,
-            contact_id: otherId,
-            name: contact?.name || null,
-            friend_code: p?.friend_code || "Unknown",
-            avatar_url: p?.avatar_url || null,
-            is_caller: c.caller_id === session.user.id,
-            status: c.status,
-            duration_seconds: c.duration_seconds,
-            created_at: c.created_at,
-          };
-        })
+        callsData
+          .filter((c) => {
+            const otherId = c.caller_id === session.user.id ? c.receiver_id : c.caller_id;
+            return !blockedUsers.includes(otherId);
+          })
+          .map((c) => {
+            const otherId = c.caller_id === session.user.id ? c.receiver_id : c.caller_id;
+            const p = profilesData.find((profile) => profile.id === otherId);
+            const contact = contactsData?.find((cont) => cont.contact_user_id === otherId);
+            return {
+              id: c.id,
+              contact_id: otherId,
+              name: contact?.name || null,
+              friend_code: p?.friend_code || "Unknown",
+              avatar_url: p?.avatar_url || null,
+              is_caller: c.caller_id === session.user.id,
+              status: c.status,
+              duration_seconds: c.duration_seconds,
+              created_at: c.created_at,
+            };
+          })
       );
     }
 
@@ -191,25 +224,7 @@ export default function Sidebar() {
       <div className="w-full md:w-80 border-r border-border bg-[#fcfcfc] dark:bg-[#151515] flex flex-col h-full shrink-0">
         <div className="p-4 border-b border-border">
           <div className="flex items-center justify-between mb-4">
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="font-semibold text-foreground flex items-center gap-2 hover:opacity-80 transition-opacity"
-              title="Open Settings"
-            >
-              {profile?.avatar_url ? (
-                <img src={profile.avatar_url} alt="Avatar" className="w-6 h-6 rounded-full object-cover" />
-              ) : (
-                <User className="w-5 h-5 text-muted-foreground" />
-              )}
-              My Profile
-            </button>
-            <button
-              onClick={handleSignOut}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
-              title="Sign out"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </button>
+            <h1 className="font-bold text-lg text-foreground">ChatApp</h1>
           </div>
           
           <div className="bg-white dark:bg-[#202020] border border-border rounded-lg p-3 shadow-sm">
@@ -262,60 +277,81 @@ export default function Sidebar() {
             <>
               <div className="flex items-center justify-between mb-4 mt-2">
                 <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Contacts</h3>
-                <button
-                  onClick={() => setIsModalOpen(true)}
-                  className="p-1 rounded-full hover:bg-input text-muted-foreground hover:text-foreground transition-colors"
-                  title="Add Contact"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setIsGroupModalOpen(true)}
+                    className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
+                    title="Create Group"
+                  >
+                    <Users className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setIsModalOpen(true)}
+                    className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-muted-foreground hover:text-foreground"
+                    title="Add Contact"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-1.5">
-                {contacts.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-6">
-                    No contacts yet. <br/>Add someone by their code!
-                  </p>
-                ) : (
-                  contacts.map((contact) => (
-                    <Link
-                      href={`/dashboard/${contact.contact_id}`}
-                      key={contact.id}
-                      className="group relative w-full flex items-center gap-3 p-3 rounded-lg hover:bg-white dark:hover:bg-[#202020] hover:shadow-sm border border-transparent hover:border-border transition-all text-left"
-                    >
-                      <div className="relative shrink-0">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center overflow-hidden">
-                          {contact.avatar_url ? (
-                            <img src={contact.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
-                          ) : (
-                            <User className="w-4 h-4 text-foreground/70" />
-                          )}
-                        </div>
-                        {onlineUserIds.has(contact.contact_id) && (
-                          <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-white dark:border-[#202020] group-hover:border-[#f9fafb] dark:group-hover:border-[#2a2a2a] transition-colors" />
+                {[{
+                  id: "ai-bot",
+                  contact_id: "00000000-0000-0000-0000-000000000000",
+                  name: "Groq AI",
+                  friend_code: "GROQAI",
+                  avatar_url: "https://ui-avatars.com/api/?name=AI&background=0D8ABC&color=fff&rounded=true&bold=true",
+                  bio: "AI Assistant",
+                  is_group: false
+                }, ...groups, ...contacts].map((contact) => (
+                  <Link
+                    href={`/dashboard/${contact.contact_id}`}
+                    key={contact.is_group ? `group-${contact.id}` : contact.id}
+                    className="group relative w-full flex items-center gap-3 p-3 rounded-lg hover:bg-white dark:hover:bg-[#202020] hover:shadow-sm border border-transparent hover:border-border transition-all text-left"
+                  >
+                    <div className="relative shrink-0">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center overflow-hidden">
+                        {contact.avatar_url ? (
+                          <img src={contact.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+                        ) : (
+                          contact.is_group ? <Users className="w-4 h-4 text-foreground/70" /> : <User className="w-4 h-4 text-foreground/70" />
                         )}
                       </div>
-                      <div className="flex-1 overflow-hidden">
-                        <p className="text-sm font-medium text-foreground truncate">
-                          {contact.name || `User ${contact.friend_code}`}
-                        </p>
+                      {!contact.is_group && onlineUserIds.has(contact.contact_id) && (
+                        <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-[#fafafa] dark:border-[#111111]" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm text-foreground truncate flex items-center justify-between">
+                        <span className="truncate pr-2">{contact.name || `User ${contact.friend_code}`}</span>
+                        {contact.is_group && <span className="text-[9px] bg-primary/10 text-primary px-1 rounded uppercase font-bold tracking-wider shrink-0">Group</span>}
                       </div>
+                      {!contact.is_group && (
+                        <div className="text-xs text-muted-foreground truncate">
+                          {contact.bio ? contact.bio : <span className="font-mono">#{contact.friend_code}</span>}
+                        </div>
+                      )}
+                    </div>
+                    {!contact.is_group && (
                       <button
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          setEditingContact({
-                            id: contact.id,
-                            name: contact.name || `User ${contact.friend_code}`
-                          });
+                          setEditingContact({ id: contact.contact_id, name: contact.name || "" });
                         }}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded-md hover:bg-input text-muted-foreground hover:text-foreground transition-all shrink-0"
+                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded hover:bg-black/5 dark:hover:bg-white/5 transition-all text-muted-foreground hover:text-foreground shrink-0"
                         title="Rename contact"
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
-                    </Link>
-                  ))
+                    )}
+                  </Link>
+                ))}
+                {contacts.length === 0 && groups.length === 0 && (
+                  <p className="text-sm text-muted-foreground text-center py-6">
+                    No contacts or groups yet. <br/>Add someone or create a group!
+                  </p>
                 )}
               </div>
             </>
@@ -376,6 +412,43 @@ export default function Sidebar() {
             </>
           )}
         </div>
+
+        {/* Bottom User Settings Bar */}
+        <div className="p-4 border-t border-border bg-black/5 dark:bg-white/5 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="relative">
+              {profile?.avatar_url ? (
+                <img src={profile.avatar_url} alt="Avatar" className="w-8 h-8 rounded-full object-cover border border-border" />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center border border-border">
+                  <User className="w-4 h-4 text-primary" />
+                </div>
+              )}
+              <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-background" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-foreground truncate">{profile?.name || "My Profile"}</div>
+              <div className="text-xs text-muted-foreground truncate">{profile?.bio || `#${profile?.friend_code}`}</div>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="w-8 h-8 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+              title="Settings"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            </button>
+            <button
+              onClick={handleSignOut}
+              className="w-8 h-8 flex items-center justify-center rounded-full text-muted-foreground hover:text-red-500 hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+              title="Sign Out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </div>
 
       <AddContactModal
@@ -398,6 +471,17 @@ export default function Sidebar() {
         onClose={() => setIsSettingsOpen(false)}
         onProfileUpdated={fetchData}
         profile={profile}
+      />
+
+      <CreateGroupModal
+        isOpen={isGroupModalOpen}
+        onClose={() => setIsGroupModalOpen(false)}
+        onGroupCreated={() => {
+          setIsGroupModalOpen(false);
+          fetchData();
+        }}
+        currentUserId={profile?.id}
+        contacts={contacts}
       />
     </>
   );

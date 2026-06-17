@@ -14,58 +14,87 @@ if (vapidPublicKey && vapidPrivateKey) {
 }
 
 serve(async (req) => {
+  console.log("Edge Function invoked! Processing Webhook...");
   try {
     const payload = await req.json();
-    const record = payload.record; // The inserted message row
+    console.log("Webhook Payload received:", JSON.stringify(payload));
+    
+    const record = payload.record;
 
-    if (!record || !record.receiver_id || !record.sender_id) {
+    if (!record || !record.sender_id || (!record.receiver_id && !record.group_id)) {
+      console.error("Invalid payload missing required fields");
       return new Response("Invalid payload", { status: 400 });
     }
 
-    // Initialize Supabase Client with Service Role to bypass RLS
+    const isGroup = !!record.group_id;
+    console.log(`Processing new message from ${record.sender_id} to ${isGroup ? 'Group ' + record.group_id : 'User ' + record.receiver_id}`);
+
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    // 1. Resolve Sender Identity for Notification
-    // We fetch the receiver's contact list to see if they named the sender.
-    const { data: contactData } = await supabaseClient
-      .from('contacts')
-      .select('name')
-      .eq('user_id', record.receiver_id)
-      .eq('contact_user_id', record.sender_id)
-      .single();
-
-    // Fallback to friend_code if no custom name exists
     const { data: senderData } = await supabaseClient
       .from('profiles')
-      .select('friend_code')
+      .select('friend_code, name')
       .eq('id', record.sender_id)
       .single();
 
-    let senderName = "Someone";
-    if (contactData && contactData.name) {
-      senderName = contactData.name;
-    } else if (senderData && senderData.friend_code) {
-      senderName = `User #${senderData.friend_code}`;
+    let senderName = senderData?.name || (senderData?.friend_code ? `User #${senderData.friend_code}` : "Someone");
+    let groupName = "";
+    
+    let targetUserIds: string[] = [];
+
+    if (isGroup) {
+      // Fetch group name
+      const { data: groupData } = await supabaseClient
+        .from('groups')
+        .select('name')
+        .eq('id', record.group_id)
+        .single();
+      
+      if (groupData) groupName = groupData.name;
+
+      // Fetch all group members EXCEPT the sender
+      const { data: members } = await supabaseClient
+        .from('group_members')
+        .select('user_id')
+        .eq('group_id', record.group_id)
+        .neq('user_id', record.sender_id);
+        
+      if (members) {
+        targetUserIds = members.map(m => m.user_id);
+      }
+    } else {
+      targetUserIds = [record.receiver_id];
     }
 
-    // 2. Fetch all active push subscriptions for the receiver
-    const { data: subscriptions } = await supabaseClient
+    if (targetUserIds.length === 0) {
+      return new Response(JSON.stringify({ success: true, message: "No recipients found" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    console.log(`Fetching subscriptions for ${targetUserIds.length} users...`);
+
+    const { data: subscriptions, error: subError } = await supabaseClient
       .from('push_subscriptions')
       .select('*')
-      .eq('user_id', record.receiver_id);
+      .in('user_id', targetUserIds);
+
+    if (subError) {
+      console.error("Error fetching subscriptions:", subError);
+    }
 
     if (!subscriptions || subscriptions.length === 0) {
       return new Response(JSON.stringify({ success: true, message: "No subscriptions found" }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    // 3. Dispatch encrypted push payloads
+    const title = isGroup ? `New message in ${groupName}` : `New message from ${senderName}`;
+    const url = isGroup ? `/dashboard/${record.group_id}` : `/dashboard/${record.sender_id}`;
+
     const notificationPayload = JSON.stringify({
-      title: `New message from ${senderName}`,
-      body: "You have received a new encrypted message.",
-      url: `/dashboard/${record.sender_id}`
+      title,
+      body: isGroup ? `${senderName}: You have a new encrypted message.` : "You have received a new encrypted message.",
+      url
     });
 
     const sendPromises = subscriptions.map(sub => {
@@ -79,25 +108,22 @@ serve(async (req) => {
 
       return webpush.sendNotification(pushSubscription, notificationPayload)
         .catch(async (error) => {
-          console.error('Error sending push notification to endpoint:', sub.endpoint, error);
-          // Auto-cleanup: If the subscription is expired or invalid, delete it from the database
           if (error.statusCode === 404 || error.statusCode === 410) {
-            await supabaseClient
-              .from('push_subscriptions')
-              .delete()
-              .eq('id', sub.id);
+            console.log(`Deleting invalid subscription ${sub.id}`);
+            await supabaseClient.from('push_subscriptions').delete().eq('id', sub.id);
           }
         });
     });
 
     await Promise.all(sendPromises);
+    console.log(`Dispatched ${subscriptions.length} pushes successfully.`);
 
     return new Response(JSON.stringify({ success: true, dispatched: subscriptions.length }), {
       headers: { "Content-Type": "application/json" },
     });
 
   } catch (error: any) {
-    console.error("Webhook processing failed:", error);
+    console.error("Webhook processing failed critically:", error);
     return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
   }
 });

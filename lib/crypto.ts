@@ -154,3 +154,85 @@ export async function decryptMessage(ciphertextBase64: string, sharedSecret: Cry
   const dec = new TextDecoder();
   return dec.decode(decryptedBuffer);
 }
+
+// ==========================================
+// Web Crypto API: File Encrypt/Decrypt
+// ==========================================
+
+export async function encryptFile(buffer: ArrayBuffer, sharedSecret: CryptoKey, iv: Uint8Array): Promise<ArrayBuffer> {
+  const ciphertext = await window.crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as any,
+    },
+    sharedSecret,
+    buffer as any
+  );
+  return ciphertext;
+}
+
+export async function decryptFile(encryptedBuffer: ArrayBuffer, sharedSecret: CryptoKey, iv: Uint8Array): Promise<ArrayBuffer> {
+  const decryptedBuffer = await window.crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as any,
+    },
+    sharedSecret,
+    encryptedBuffer as any
+  );
+  return decryptedBuffer;
+}
+
+// ==========================================
+// Web Crypto API: Group Keys (E2EE)
+// ==========================================
+
+export async function generateGroupKey(): Promise<CryptoKey> {
+  return window.crypto.subtle.generateKey(
+    {
+      name: "AES-GCM",
+      length: 256,
+    },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
+export async function exportGroupKey(key: CryptoKey): Promise<ArrayBuffer> {
+  return window.crypto.subtle.exportKey("raw", key);
+}
+
+export async function importGroupKey(rawKey: ArrayBuffer): Promise<CryptoKey> {
+  return window.crypto.subtle.importKey(
+    "raw",
+    rawKey,
+    { name: "AES-GCM" },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
+export async function encryptGroupKeyForUser(groupKeyBuffer: ArrayBuffer, sharedSecret: CryptoKey, iv: Uint8Array): Promise<string> {
+  const ciphertext = await window.crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as any,
+    },
+    sharedSecret,
+    groupKeyBuffer as any
+  );
+  return bufferToBase64(ciphertext);
+}
+
+export async function decryptGroupKeyFromUser(encryptedGroupKeyBase64: string, sharedSecret: CryptoKey, iv: Uint8Array): Promise<CryptoKey> {
+  const ciphertextBuffer = base64ToBuffer(encryptedGroupKeyBase64);
+  const decryptedBuffer = await window.crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as any,
+    },
+    sharedSecret,
+    ciphertextBuffer as any
+  );
+  return importGroupKey(decryptedBuffer);
+}
