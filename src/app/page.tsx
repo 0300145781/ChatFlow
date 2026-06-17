@@ -23,6 +23,13 @@ export default function AuthPage() {
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
+        // Ensure private key exists on this device (e.g., if logging in from a new domain/device but session persists)
+        const existingKey = await getPrivateKey(session.user.id);
+        if (!existingKey) {
+          const { publicKeyStr, privateKey } = await generateKeyPair();
+          await storePrivateKey(session.user.id, privateKey);
+          await supabase.from("profiles").update({ public_key: publicKeyStr }).eq("id", session.user.id);
+        }
         router.push("/dashboard");
       } else {
         setLoading(false);

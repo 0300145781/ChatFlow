@@ -32,6 +32,19 @@ export default function Sidebar() {
       return;
     }
 
+    // Ensure E2E keys exist on this device!
+    const { getPrivateKey, generateKeyPair, storePrivateKey } = await import("../../lib/crypto");
+    const existingKey = await getPrivateKey(session.user.id);
+    if (!existingKey) {
+      console.warn("Generating new E2E keys for this device...");
+      const { publicKeyStr, privateKey } = await generateKeyPair();
+      await storePrivateKey(session.user.id, privateKey);
+      await supabase.from("profiles").update({ public_key: publicKeyStr }).eq("id", session.user.id);
+      // Reload so all components (ChatInterface) pick up the new key cleanly
+      window.location.reload();
+      return;
+    }
+
     // Fetch user profile
     const { data: profileData } = await supabase
       .from("profiles")
