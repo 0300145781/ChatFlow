@@ -160,12 +160,9 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
                   <Pencil className="w-3.5 h-3.5" />
                 </button>
               )}
-              <div title="Messages are end-to-end encrypted. Changing devices or clearing your browser cache will cause older messages to become unreadable." className="text-green-500/80 dark:text-green-400/80 cursor-help">
-                <Lock className="w-3 h-3" />
-              </div>
             </div>
             <p className="text-xs text-muted-foreground font-mono mt-0.5">
-              {isGroup ? "Encrypted Group" : `#${contactInfo.friend_code}`}
+              {isGroup ? "Group Chat" : `#${contactInfo.friend_code}`}
             </p>
           </div>
         </div>
@@ -239,8 +236,6 @@ export default function ChatPage({ params }: { params: Promise<{ contactId: stri
         <ChatInterface 
           currentUserId={currentUser.id} 
           contactId={resolvedParams.contactId} 
-          currentUserPublicKey={currentUser.public_key}
-          contactPublicKey={contactInfo.public_key}
           blockedUsers={currentUser.user_metadata?.blocked_users || []}
           isGroup={isGroup}
         />

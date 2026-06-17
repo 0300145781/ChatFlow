@@ -3,16 +3,15 @@ import { motion } from "framer-motion";
 import { Eraser, CheckCheck, Check } from "lucide-react";
 import { Message } from "../types";
 import AudioPlayer from "./AudioPlayer";
-import EncryptedMedia from "./EncryptedMedia";
 import ReactionPicker from "./ReactionPicker";
 import MessageOptions from "./MessageOptions";
+import { supabase } from "../../lib/supabase";
 
 interface MessageBubbleProps {
   msg: Message;
   currentUserId: string;
   isMine: boolean;
   activeMessageId: string | null;
-  e2eKeysRef: React.MutableRefObject<any>;
   setActiveReply: (msg: Message) => void;
   setActiveMessageId: (id: string | null) => void;
   handleReaction: (msg: Message, emoji: string) => void;
@@ -26,7 +25,6 @@ const MessageBubble = memo(({
   currentUserId,
   isMine,
   activeMessageId,
-  e2eKeysRef,
   setActiveReply,
   setActiveMessageId,
   handleReaction,
@@ -53,8 +51,6 @@ const MessageBubble = memo(({
             className={`relative flex flex-col text-[15px] leading-relaxed transition-all touch-pan-y ${
               msg.is_deleted
                 ? "px-5 py-3 bg-black/5 dark:bg-white/5 text-muted-foreground italic rounded-3xl border border-dashed border-border shadow-none"
-                : msg.decryptionFailed
-                ? "px-5 py-3 bg-red-50 dark:bg-red-950/20 text-red-500/80 dark:text-red-400/80 text-sm italic rounded-3xl border border-dashed border-red-200 dark:border-red-900 shadow-none"
                 : isMine
                 ? "bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-3xl rounded-br-sm shadow-md"
                 : "bg-white dark:bg-[#202020] text-foreground rounded-3xl rounded-bl-sm shadow-[0_2px_8px_-4px_rgba(0,0,0,0.1)] border border-border"
@@ -70,12 +66,10 @@ const MessageBubble = memo(({
                 <div className="line-clamp-2 text-xs opacity-90">
                   {msg.reply_to.is_deleted 
                     ? "This message was deleted" 
-                    : msg.reply_to.decryptionFailed
-                    ? "🔒 Encrypted (Key missing)"
                     : msg.reply_to.type === "audio" 
-                    ? "🎤 Audio Message" 
+                    ? "🎙️ Voice Message" 
                     : msg.reply_to.type === "image"
-                    ? "📷 Image"
+                    ? "📷 Media"
                     : msg.reply_to.content}
                 </div>
               </div>
@@ -97,7 +91,7 @@ const MessageBubble = memo(({
                 <AudioPlayer src={msg.content} />
               ) : msg.type === "image" ? (
                 <div className="-mx-3 -my-1">
-                  <EncryptedMedia message={msg} e2eKeysRef={e2eKeysRef} currentUserId={currentUserId} />
+                  <img src={supabase.storage.from("voice_notes").getPublicUrl(msg.content).data.publicUrl} alt="Media" className="max-w-full rounded-2xl cursor-pointer hover:opacity-90 transition-opacity max-h-[300px] object-cover" />
                 </div>
               ) : (
                 msg.content

@@ -7,10 +7,8 @@ import AudioPlayer from "./AudioPlayer";
 import MessageOptions from "./MessageOptions";
 import ReactionPicker from "./ReactionPicker";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPrivateKey, importPublicKey, deriveSharedSecret, encryptMessage, decryptMessage, encryptFile, decryptFile } from "../../lib/crypto";
 import { useSettings } from "../hooks/useSettings";
 import MessageBubble from "./MessageBubble";
-import EncryptedMedia from "./EncryptedMedia";
 import { Message } from "../types";
 
 
@@ -20,8 +18,6 @@ import { Message } from "../types";
 interface ChatInterfaceProps {
   currentUserId: string;
   contactId: string;
-  currentUserPublicKey?: string | null;
-  contactPublicKey?: string | null;
   blockedUsers?: string[];
   isGroup?: boolean;
 }
@@ -31,7 +27,7 @@ let sharedChannel: any = null;
 type Listener = (event: string, payload: any) => void;
 const listeners = new Set<Listener>();
 
-export default function ChatInterface({ currentUserId, contactId, currentUserPublicKey, contactPublicKey, blockedUsers = [], isGroup = false }: ChatInterfaceProps) {
+export default function ChatInterface({ currentUserId, contactId, blockedUsers = [], isGroup = false }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -45,7 +41,6 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
   const channelRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingMedia, setUploadingMedia] = useState(false);
-  const e2eKeysRef = useRef<{ mySharedSecret: CryptoKey | null, receiverSharedSecret: CryptoKey | null, groupSharedSecret: CryptoKey | null }>({ mySharedSecret: null, receiverSharedSecret: null, groupSharedSecret: null });
   const [myAvatarUrl, setMyAvatarUrl] = useState<string | null>(null);
   const [isAITyping, setIsAITyping] = useState(false);
 
@@ -71,81 +66,6 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     return () => document.removeEventListener("click", handleGlobalClick);
   }, []);
 
-  const decryptSingleMessage = async (msg: Message) => {
-    if (!msg || !msg.content) return msg;
-
-    if (!msg.content.includes('"e2ee":true') && !msg.content.includes('"forSender":') && !msg.content.includes('"forGroup":')) {
-      return msg; // Plaintext
-    }
-    
-    if (msg.group_id) {
-      if (!e2eKeysRef.current.groupSharedSecret) {
-        return { ...msg, content: "🔒 Message encrypted (Group key missing)", decryptionFailed: true };
-      }
-      try {
-        const parsed = JSON.parse(msg.content);
-        if (parsed.iv && parsed.forGroup) {
-          const iv = new Uint8Array(parsed.iv);
-          const decrypted = await decryptMessage(parsed.forGroup, e2eKeysRef.current.groupSharedSecret, iv);
-          return { ...msg, content: decrypted, is_ai: parsed.is_ai };
-        }
-      } catch (e) {
-        console.warn("Group decryption failed.");
-      }
-      return { ...msg, content: "🔒 Message encrypted (Decryption failed)", decryptionFailed: true };
-    }
-
-    if (!e2eKeysRef.current.mySharedSecret && !e2eKeysRef.current.receiverSharedSecret) {
-      return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
-    }
-
-    try {
-      const parsed = JSON.parse(msg.content);
-      if (parsed.iv) {
-        const iv = new Uint8Array(parsed.iv);
-        const secret = msg.sender_id === currentUserId ? e2eKeysRef.current.mySharedSecret : e2eKeysRef.current.receiverSharedSecret;
-        
-        if (!secret) throw new Error("Missing shared secret");
-        
-        const ciphertext = msg.sender_id === currentUserId ? parsed.forSender : parsed.forReceiver;
-        const decrypted = await decryptMessage(ciphertext, secret, iv);
-        return { ...msg, content: decrypted, is_ai: parsed.is_ai };
-      }
-    } catch (e) {
-      // Expected behavior if keys don't match or ciphertext is corrupted
-      console.warn("Decryption failed for a message (likely due to missing/changed keys).");
-    }
-    
-    return { ...msg, content: "🔒 Message encrypted (Key missing from device/cache)", decryptionFailed: true };
-  };
-
-  const encryptPayload = async (text: string) => {
-    if (isGroup) {
-      const groupSecret = e2eKeysRef.current.groupSharedSecret;
-      if (!groupSecret) return text;
-      try {
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const forGroup = await encryptMessage(text, groupSecret, iv);
-        return JSON.stringify({ forGroup, iv: Array.from(iv), e2ee: true, isGroup: true });
-      } catch (e) {
-        console.error("Group encryption failed", e);
-        return text;
-      }
-    }
-
-    const { mySharedSecret, receiverSharedSecret } = e2eKeysRef.current;
-    if (!mySharedSecret || !receiverSharedSecret) return text; // Fallback to plaintext if keys missing
-    try {
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const forSender = await encryptMessage(text, mySharedSecret, iv);
-      const forReceiver = await encryptMessage(text, receiverSharedSecret, iv);
-      return JSON.stringify({ forSender, forReceiver, iv: Array.from(iv), e2ee: true });
-    } catch (e) {
-      console.error("Encryption failed", e);
-      return text;
-    }
-  };
-
   const fetchMessages = async () => {
     setLoading(true);
     let query = supabase.from("messages").select("*, reply_to:messages!reply_to_id(*)");
@@ -161,53 +81,13 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     const { data, error } = await query.order("created_at", { ascending: true });
 
     if (data) {
-      const decryptedData = await Promise.all(data.map(async msg => {
-        if (msg.reply_to) {
-          msg.reply_to = await decryptSingleMessage(msg.reply_to);
-        }
-        return await decryptSingleMessage(msg);
-      }));
-      setMessages(decryptedData);
+      setMessages(data);
     }
     setLoading(false);
   };
 
   useEffect(() => {
-    const initKeysAndFetch = async () => {
-      try {
-        const myPrivKey = await getPrivateKey(currentUserId);
-        if (myPrivKey) {
-          if (isGroup) {
-            // Fetch group key
-            const { data: keyData } = await supabase.from("group_keys").select("encrypted_key").eq("group_id", contactId).eq("user_id", currentUserId).single();
-            if (keyData) {
-              const parsed = JSON.parse(keyData.encrypted_key);
-              const { data: encryptorData } = await supabase.from("profiles").select("public_key").eq("id", parsed.encrypted_by).single();
-              if (encryptorData?.public_key) {
-                const encryptorPub = await importPublicKey(encryptorData.public_key);
-                const sharedWithEncryptor = await deriveSharedSecret(myPrivKey, encryptorPub);
-                const { decryptGroupKeyFromUser } = await import("../../lib/crypto");
-                e2eKeysRef.current.groupSharedSecret = await decryptGroupKeyFromUser(parsed.key, sharedWithEncryptor, new Uint8Array(parsed.iv));
-              }
-            }
-          } else {
-            if (currentUserPublicKey) {
-              const myPub = await importPublicKey(currentUserPublicKey);
-              e2eKeysRef.current.mySharedSecret = await deriveSharedSecret(myPrivKey, myPub);
-            }
-            if (contactPublicKey) {
-              const contactPub = await importPublicKey(contactPublicKey);
-              e2eKeysRef.current.receiverSharedSecret = await deriveSharedSecret(myPrivKey, contactPub);
-            }
-          }
-        }
-      } catch (e) {
-        console.error("Failed to initialize E2EE keys", e);
-      }
-      await fetchMessages();
-    };
-    
-    initKeysAndFetch();
+    fetchMessages();
 
     // Initialize the global WebSocket channel EXACTLY ONCE for the entire application lifecycle
     if (!sharedChannel) {
@@ -276,19 +156,15 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
             return;
           }
         }
-          decryptSingleMessage(msg).then(decryptedMsg => {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === decryptedMsg.id)) return prev;
-              return [...prev, decryptedMsg];
-            });
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [...prev, msg];
           });
       }
 
       if (event === "message_updated" || event === "pg_update") {
         const msg = payload as Message;
-        decryptSingleMessage(msg).then(decryptedMsg => {
-          setMessages((prev) => prev.map((m) => (m.id === decryptedMsg.id ? decryptedMsg : m)));
-        });
+        setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)));
       }
 
       if (event === "messages_read") {
@@ -328,7 +204,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       // Cleanly detach the React state, but NEVER kill the WebSocket
       listeners.delete(listener);
     };
-  }, [contactId, currentUserId, currentUserPublicKey, contactPublicKey, blockedUsers]);
+  }, [contactId, currentUserId, blockedUsers]);
 
   useEffect(() => {
     if (!messages.length || !contactId) return;
@@ -387,8 +263,6 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     setSending(true);
     const tempContent = newMessage.trim();
     setNewMessage("");
-    
-    const encryptedContent = await encryptPayload(tempContent);
 
     const tempId = crypto.randomUUID();
     const tempMessage: Message = {
@@ -396,7 +270,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       sender_id: currentUserId,
       receiver_id: isGroup ? null as any : contactId,
       group_id: isGroup ? contactId : null,
-      content: tempContent, // Optimistically render the plaintext version instantly
+      content: tempContent, // Plaintext
       type: "text",
       created_at: new Date().toISOString(),
       reply_to_id: activeReply?.id || null,
@@ -406,17 +280,15 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
     // Clear reply state
     setActiveReply(null);
 
-    // Optimistic UI update (Sender instantly sees plaintext)
+    // Optimistic UI update
     setMessages((prev) => [...prev, tempMessage]);
 
-    // Broadcast instantly to receiver (must broadcast encrypted payload)
-    const broadcastMessage = { ...tempMessage, content: encryptedContent };
-    
+    // Broadcast instantly to receiver
     if (channelRef.current) {
       channelRef.current.send({
         type: "broadcast",
         event: "new_message",
-        payload: broadcastMessage,
+        payload: tempMessage,
       });
     }
 
@@ -426,7 +298,7 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
         sender_id: currentUserId,
         receiver_id: isGroup ? null : contactId,
         group_id: isGroup ? contactId : null,
-        content: encryptedContent,
+        content: tempContent,
         type: "text",
         reply_to_id: tempMessage.reply_to_id,
       },
@@ -482,39 +354,21 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
       }
 
       // We have the AI's reply. Let's insert it!
-      let aiEncryptedContent = aiResponseText;
+      let aiContent = aiResponseText;
       let finalSenderId = '00000000-0000-0000-0000-000000000000';
       let finalReceiverId = isGroup ? null : currentUserId;
       
-      if (isGroup && e2eKeysRef.current.groupSharedSecret) {
-        try {
-          const iv = crypto.getRandomValues(new Uint8Array(12));
-          const forGroup = await encryptMessage(aiResponseText, e2eKeysRef.current.groupSharedSecret, iv);
-          aiEncryptedContent = JSON.stringify({ forGroup, iv: Array.from(iv), e2ee: true, isGroup: true, is_ai: true });
-        } catch (e) {
-          console.error("AI Group encryption failed", e);
-        }
-      } else if (!isGroup && contactId !== '00000000-0000-0000-0000-000000000000') {
+      if (!isGroup && contactId !== '00000000-0000-0000-0000-000000000000') {
         // 1-on-1 chat with a friend! We must insert as the current user so it stays in the chat room
         finalSenderId = currentUserId;
         finalReceiverId = contactId;
-        if (e2eKeysRef.current.mySharedSecret && e2eKeysRef.current.receiverSharedSecret) {
-          try {
-            const iv = crypto.getRandomValues(new Uint8Array(12));
-            const forSender = await encryptMessage(aiResponseText, e2eKeysRef.current.mySharedSecret, iv);
-            const forReceiver = await encryptMessage(aiResponseText, e2eKeysRef.current.receiverSharedSecret, iv);
-            aiEncryptedContent = JSON.stringify({ forSender, forReceiver, iv: Array.from(iv), e2ee: true, is_ai: true });
-          } catch (e) {
-            console.error("AI 1-on-1 encryption failed", e);
-          }
-        }
       }
 
       await supabase.from("messages").insert([{
         sender_id: finalSenderId,
         receiver_id: finalReceiverId,
         group_id: isGroup ? contactId : null,
-        content: aiEncryptedContent,
+        content: aiContent,
         type: "text",
         reply_to_id: replyToId,
       }]);
@@ -538,23 +392,10 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
 
     setUploadingMedia(true);
     try {
-      const buffer = await file.arrayBuffer();
-      
-      const mySharedSecret = isGroup ? e2eKeysRef.current.groupSharedSecret : e2eKeysRef.current.mySharedSecret;
-      if (!mySharedSecret) throw new Error("Encryption key not ready");
-      
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const encryptedData = await encryptFile(buffer, mySharedSecret, iv);
-      
-      // Merge IV and encryptedData
-      const finalBuffer = new Uint8Array(12 + encryptedData.byteLength);
-      finalBuffer.set(iv, 0);
-      finalBuffer.set(new Uint8Array(encryptedData), 12);
-      
       const path = `${currentUserId}/media/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '')}`;
       
-      const { error: uploadError } = await supabase.storage.from("voice_notes").upload(path, finalBuffer, {
-        contentType: "application/octet-stream"
+      const { error: uploadError } = await supabase.storage.from("voice_notes").upload(path, file, {
+        contentType: file.type
       });
       
       if (uploadError) throw uploadError;
@@ -736,7 +577,6 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
                 currentUserId={currentUserId}
                 isMine={isMine}
                 activeMessageId={activeMessageId}
-                e2eKeysRef={e2eKeysRef}
                 setActiveReply={setActiveReply}
                 setActiveMessageId={setActiveMessageId}
                 handleReaction={handleReaction}
@@ -786,10 +626,10 @@ export default function ChatInterface({ currentUserId, contactId, currentUserPub
                     <div className="text-sm text-muted-foreground line-clamp-1">
                       {activeReply.is_deleted 
                         ? "This message was deleted" 
-                        : activeReply.decryptionFailed
-                        ? "🔒 Encrypted (Key missing)"
                         : activeReply.type === "audio" 
-                        ? "🎤 Audio Message" 
+                        ? "🎙️ Voice Message" 
+                        : activeReply.type === "image"
+                        ? "📷 Media"
                         : activeReply.content}
                     </div>
                   </div>

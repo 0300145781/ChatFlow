@@ -8,8 +8,6 @@ import { Loader2 } from "lucide-react";
 
 import { ChatFlowLogo } from "../components/ChatFlowLogo";
 
-import { generateKeyPair, storePrivateKey, getPrivateKey } from "../../lib/crypto";
-
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
@@ -23,13 +21,6 @@ export default function AuthPage() {
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        // Ensure private key exists on this device (e.g., if logging in from a new domain/device but session persists)
-        const existingKey = await getPrivateKey(session.user.id);
-        if (!existingKey) {
-          const { publicKeyStr, privateKey } = await generateKeyPair();
-          await storePrivateKey(session.user.id, privateKey);
-          await supabase.from("profiles").update({ public_key: publicKeyStr }).eq("id", session.user.id);
-        }
         router.push("/dashboard");
       } else {
         setLoading(false);
@@ -51,25 +42,9 @@ export default function AuthPage() {
           password,
         });
         if (signInError) throw signInError;
-        
-        // E2EE: Check for private key on this device
-        if (signInData.user) {
-          const userId = signInData.user.id;
-          const existingKey = await getPrivateKey(userId);
-          if (!existingKey) {
-            // New device login: generate a new keypair and overwrite public_key in profiles
-            const { publicKeyStr, privateKey } = await generateKeyPair();
-            await storePrivateKey(userId, privateKey);
-            await supabase.from("profiles").update({ public_key: publicKeyStr }).eq("id", userId);
-          }
-        }
-        
         router.push("/dashboard");
       } else {
         const friendCode = nanoid(6).toUpperCase();
-        
-        // E2EE: Generate keypair for new user
-        const { publicKeyStr, privateKey } = await generateKeyPair();
         
         const { data, error: signUpError } = await supabase.auth.signUp({
           email,
@@ -77,16 +52,11 @@ export default function AuthPage() {
           options: {
             data: {
               friend_code: friendCode,
-              public_key: publicKeyStr,
+              public_key: null, // No longer used
             },
           },
         });
         if (signUpError) throw signUpError;
-        
-        if (data.user) {
-          // Store the private key in IndexedDB for this user
-          await storePrivateKey(data.user.id, privateKey);
-        }
         
         if (data.session) {
           router.push("/dashboard");

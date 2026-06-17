@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
 import { Loader2, X, Users, Settings, UserMinus, UserPlus, LogOut } from "lucide-react";
-import { exportGroupKey, encryptGroupKeyForUser, getPrivateKey, deriveSharedSecret, importPublicKey } from "../../lib/crypto";
 
 interface GroupSettingsModalProps {
   isOpen: boolean;

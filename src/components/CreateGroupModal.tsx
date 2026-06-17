@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../../lib/supabase";
 import { Loader2, X, Users, Search, Check } from "lucide-react";
-import { generateGroupKey, exportGroupKey, encryptGroupKeyForUser, getPrivateKey, deriveSharedSecret, importPublicKey } from "../../lib/crypto";
 
 interface Contact {
   id: string;
@@ -11,7 +10,6 @@ interface Contact {
   name: string | null;
   friend_code: string;
   avatar_url: string | null;
-  public_key?: string | null;
 }
 
 interface CreateGroupModalProps {
@@ -28,7 +26,6 @@ export default function CreateGroupModal({ isOpen, onClose, onGroupCreated, curr
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [contactsWithKeys, setContactsWithKeys] = useState<Contact[]>([]);
 
   useEffect(() => {
     if (isOpen) {
@@ -36,30 +33,12 @@ export default function CreateGroupModal({ isOpen, onClose, onGroupCreated, curr
       setSearchQuery("");
       setSelectedContactIds(new Set());
       setError("");
-      
-      // Fetch public keys for contacts
-      const fetchKeys = async () => {
-        const { data } = await supabase
-          .from("profiles")
-          .select("id, public_key")
-          .in("id", contacts.map(c => c.contact_id));
-        
-        if (data) {
-          setContactsWithKeys(contacts.map(c => {
-            const p = data.find(d => d.id === c.contact_id);
-            return { ...c, public_key: p?.public_key };
-          }));
-        } else {
-          setContactsWithKeys(contacts);
-        }
-      };
-      fetchKeys();
     }
-  }, [isOpen, contacts]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const filteredContacts = contactsWithKeys.filter(c => 
+  const filteredContacts = contacts.filter(c => 
     c.name?.toLowerCase().includes(searchQuery.toLowerCase()) || 
     c.friend_code.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -104,54 +83,6 @@ export default function CreateGroupModal({ isOpen, onClose, onGroupCreated, curr
 
       const { error: membersError } = await supabase.from("group_members").insert(membersToInsert);
       if (membersError) throw membersError;
-
-      // 3. E2EE: Generate Group Key
-      const groupKey = await generateGroupKey();
-      const exportedKey = await exportGroupKey(groupKey);
-      
-      const myPrivKey = await getPrivateKey(currentUserId);
-      if (!myPrivKey) throw new Error("Your private key is missing. Please log in again.");
-
-      // Fetch my public key for encrypting my own copy of the group key
-      const { data: myProfile } = await supabase.from("profiles").select("public_key").eq("id", currentUserId).single();
-      if (!myProfile?.public_key) throw new Error("Your public key is missing.");
-
-      // Combine me and the selected contacts to distribute keys
-      const membersToDistributeKeysTo = [
-        { id: currentUserId, public_key: myProfile.public_key },
-        ...Array.from(selectedContactIds).map(id => {
-          const c = contactsWithKeys.find(contact => contact.contact_id === id);
-          return { id, public_key: c?.public_key };
-        })
-      ];
-
-      const groupKeysToInsert = [];
-
-      for (const member of membersToDistributeKeysTo) {
-        if (!member.public_key) {
-          console.warn(`User ${member.id} is missing a public key. They will not be able to decrypt the group chat.`);
-          continue;
-        }
-
-        const memberPub = await importPublicKey(member.public_key);
-        const sharedSecret = await deriveSharedSecret(myPrivKey, memberPub);
-        
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encryptedKeyBase64 = await encryptGroupKeyForUser(exportedKey, sharedSecret, iv);
-        
-        groupKeysToInsert.push({
-          group_id: groupId,
-          user_id: member.id,
-          encrypted_key: JSON.stringify({ 
-            iv: Array.from(iv), 
-            key: encryptedKeyBase64,
-            encrypted_by: currentUserId
-          })
-        });
-      }
-
-      const { error: keysError } = await supabase.from("group_keys").insert(groupKeysToInsert);
-      if (keysError) throw keysError;
 
       onGroupCreated();
       onClose();
